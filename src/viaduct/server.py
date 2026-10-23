@@ -14,7 +14,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from viaduct import __version__, connectivity, kicad_io, plan as planmod
+from viaduct import __version__, connectivity, kicad_io, plan as planmod, setup_files
 from viaduct.headless import Headless
 
 mcp = FastMCP("viaduct", instructions=(
@@ -167,6 +167,150 @@ def set_copper_layers(count: int, confirm: bool = False) -> dict:
         return {"changed": False, "current": current, "requested": count,
                 "note": "pass confirm=true to apply" if count != current else "already set"}
     return {"changed": True, **kicad_io.set_copper_layers(board, count)}
+
+
+@mcp.tool()
+def get_board_setup() -> dict:
+    """Board setup Konnect does not read: copper layer count, text variables, grid and drill
+    origins, and text and graphics defaults. Read net classes and the physical stackup with
+    Konnect's get_netclasses and get_board_stackup.
+
+    `not_in_api` maps the Board Setup settings KiCad's API cannot reach to the tool that writes
+    them into the files instead, which needs the project closed in KiCad.
+    """
+    board = session.board()
+    return {
+        "copper_layers": board.get_copper_layer_count(),
+        "text_variables": kicad_io.text_variables(board),
+        "origins": kicad_io.origins(board),
+        "graphics_defaults": kicad_io.graphics_defaults(board),
+        "not_in_api": {
+            "constraints": "Konnect set_design_rules", "predefined sizes": "Konnect set_predefined_sizes",
+            "netclass assignments and patterns": "Konnect assign_net_to_class",
+            "removing a netclass or unsetting a field": "edit_netclass_file", "stackup": "set_stackup",
+            "layer names and types": "set_layer_names", "solder mask, paste, via protection": "set_mask_and_paste",
+            "violation severities, teardrops, length tuning, text and graphics defaults": "set_project_settings",
+            "custom rules": "Konnect add_design_rule"},
+    }
+
+
+@mcp.tool()
+def set_net_class(name: str, clearance: float | None = None, track_width: float | None = None,
+                  via_diameter: float | None = None, via_drill: float | None = None,
+                  microvia_diameter: float | None = None, microvia_drill: float | None = None,
+                  diff_pair_track_width: float | None = None, diff_pair_gap: float | None = None,
+                  diff_pair_via_gap: float | None = None, priority: int | None = None,
+                  color: str | None = None) -> dict:
+    """Create a netclass or change its routing rules (mm). Fields left out keep their value.
+
+    color is #RRGGBB or #RRGGBBAA. A lower priority wins when a net is in several classes.
+    KiCad's API cannot unset a field, remove a class or assign nets to one: edit_netclass_file
+    and Konnect's assign_net_to_class do that in the project file, with the project closed.
+    Changes are project settings outside the undo history. Nets keep their old effective rules
+    until save_board, so save before check_plan relies on new values.
+    """
+    values = {"clearance": clearance, "track_width": track_width, "via_diameter": via_diameter,
+              "via_drill": via_drill, "microvia_diameter": microvia_diameter, "microvia_drill": microvia_drill,
+              "diff_pair_track_width": diff_pair_track_width, "diff_pair_gap": diff_pair_gap,
+              "diff_pair_via_gap": diff_pair_via_gap, "priority": priority, "color": color}
+    return kicad_io.set_net_class(session.board(), name, values)
+
+
+@mcp.tool()
+def set_text_variables(variables: dict[str, str] | None = None, remove: list[str] | None = None) -> dict:
+    """Add or change project text variables (${NAME} in text), and remove the names in remove.
+    Returns all variables afterwards."""
+    return kicad_io.set_text_variables(session.board(), variables or {}, remove or ())
+
+
+@mcp.tool()
+def set_board_origin(kind: str, x: float, y: float) -> dict:
+    """Move the grid origin or the drill/place origin (kind: grid or drill) to x, y in mm.
+    Returns both origins afterwards."""
+    return kicad_io.set_origin(session.board(), kind, x, y)
+
+
+@mcp.tool()
+def read_setup_files(board: str) -> dict:
+    """Read the board setup KiCad's API cannot reach, from the files of a .kicad_pcb and its
+    .kicad_pro: violation severities, teardrop and length-tuning defaults, text and graphics
+    defaults, netclasses as stored, solder mask and paste, via protection, layer names and
+    types, and the physical stackup (KiCad's default when the board stores none).
+
+    Also reports whether KiCad has the project open: the set_* file tools refuse while it does.
+    """
+    return setup_files.read(board)
+
+
+@mcp.tool()
+def set_project_settings(board: str, rule_severities: dict | None = None, teardrops: dict | None = None,
+                         tuning_patterns: dict | None = None, graphics_defaults: dict | None = None,
+                         confirm: bool = False) -> dict:
+    """Change Board Setup settings stored in the project file (.kicad_pro next to board).
+
+    rule_severities: {"silk_overlap": "ignore", ...} (error, warning or ignore).
+    teardrops: {"options": {...}, "td_round_shape": {...}, "td_rect_shape": {...}, "td_track_end": {...}}.
+    tuning_patterns: {"single_track_defaults": {"spacing": 0.8}, ...}.
+    graphics_defaults: {"silk_line_width": 0.12, "zones": {"min_clearance": 0.3}, ...}.
+    Keys and types must match what read_setup_files shows. KiCad must not have the project
+    open. Without confirm=true this is a dry run that lists the changes.
+    """
+    return setup_files.set_project_settings(board, rule_severities, teardrops, tuning_patterns,
+                                            graphics_defaults, confirm)
+
+
+@mcp.tool()
+def edit_netclass_file(board: str, name: str, remove: bool = False, unset: list[str] | None = None,
+                       confirm: bool = False) -> dict:
+    """Remove a netclass from the project file, or unset fields so it inherits them from Default.
+
+    Removing moves the class's netclass patterns to Default and drops it from net assignments,
+    as Board Setup does. unset takes clearance, track_width, via_diameter, via_drill,
+    microvia_diameter, microvia_drill, diff_pair_width, diff_pair_gap, diff_pair_via_gap or
+    pcb_color. KiCad must not have the project open. Without confirm=true this is a dry run.
+    """
+    return setup_files.edit_net_class(board, name, remove, unset, confirm)
+
+
+@mcp.tool()
+def set_mask_and_paste(board: str, mask_and_paste: dict | None = None, via_protection: dict | None = None,
+                       confirm: bool = False) -> dict:
+    """Change solder mask, paste and via protection settings in the board file.
+
+    mask_and_paste: pad_to_mask_clearance, solder_mask_min_width, pad_to_paste_clearance (mm),
+    pad_to_paste_clearance_ratio (-0.1 is -10%), allow_soldermask_bridges_in_footprints.
+    via_protection: tenting, covering, plugging ({"front": bool, "back": bool}), capping, filling.
+    KiCad must not have the project open. Without confirm=true this is a dry run.
+    """
+    return setup_files.set_mask_and_paste(board, mask_and_paste, via_protection, confirm)
+
+
+@mcp.tool()
+def set_layer_names(board: str, layers: dict, confirm: bool = False) -> dict:
+    """Rename layers or set copper layer types in the board file.
+
+    layers: {"In1.Cu": {"name": "GND", "type": "power"}, "User.1": {"name": "Notes"}}. Types are
+    signal, power, mixed or jumper (copper only); an empty name restores the default. KiCad
+    must not have the project open. Without confirm=true this is a dry run.
+    """
+    return setup_files.set_layer_names(board, layers, confirm)
+
+
+@mcp.tool()
+def set_stackup(board: str, layers: list[dict] | None = None, copper_finish: str | None = None,
+                impedance_controlled: bool | None = None, edge_connector: str | None = None,
+                edge_plating: bool | None = None, confirm: bool = False) -> dict:
+    """Change the physical stackup in the board file; the board thickness follows the stackup.
+
+    layers: [{"layer": "dielectric 1", "thickness": 1.2, "material": "FR4", "epsilon_r": 4.4,
+    "loss_tangent": 0.02, "type": "core"}, {"layer": "F.Cu", "thickness": 0.07}, {"layer":
+    "F.Mask", "color": "Black"}]; "sublayer" picks a dielectric sublayer (default 0). Copper
+    layers are added live with set_copper_layers, not here. A board without a stored stackup
+    gets KiCad's default with the changes applied. edge_connector: none, yes or bevelled.
+    KiCad must not have the project open. Without confirm=true this is a dry run.
+    """
+    return setup_files.set_stackup(board, layers, copper_finish, impedance_controlled, edge_connector,
+                                   edge_plating, confirm)
 
 
 @mcp.tool()

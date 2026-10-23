@@ -37,6 +37,7 @@ class Headless:
         self.board: Path | None = None
         self.source: Path | None = None
         self.log: Path | None = None
+        self.locks: list[Path] = []
         atexit.register(self.stop)
 
     @property
@@ -74,6 +75,10 @@ class Headless:
         else:
             self.board = src
         self.source = src
+        # pcbnew is stopped with a signal and leaves its lock files behind: remember the ones it
+        # will create, so stop() can remove them and KiCad does not later report the file as locked
+        self.locks = [lk for lk in (lock_file(self.board), lock_file(self.board.with_suffix(".kicad_pro")))
+                      if not lk.exists()]
         self.log = self.root / "pcbnew.log"
         env = dict(os.environ, TMPDIR=str(self.root / "t"))
         env.pop("KICAD_API_SOCKET", None)
@@ -107,6 +112,9 @@ class Headless:
                 os.killpg(self.proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+        for lk in self.locks:
+            lk.unlink(missing_ok=True)
+        self.locks = []
         if root and not keep_files:
             shutil.rmtree(root, ignore_errors=True)
         copied = bool(root and board and root in board.parents)

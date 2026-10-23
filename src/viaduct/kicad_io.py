@@ -1,5 +1,7 @@
 """Everything that talks to KiCad: reading the live board into a BoardModel
-and writing plans back as one commit (one undo step).
+and writing plans back as one commit (one undo step), plus the board setup
+KiCad exposes and Konnect does not cover (live netclass edits, text variables,
+origins, graphics defaults).
 
 All public values are millimetres; KiCad's API uses nanometres.
 """
@@ -8,12 +10,16 @@ from __future__ import annotations
 
 import re
 
+from google.protobuf.empty_pb2 import Empty
 from kipy import KiCad
 from kipy.board_types import (ArcTrack, BoardArc, BoardCircle, BoardPolygon, BoardRectangle,
                               BoardSegment, Track, Via, Zone)
 from kipy.geometry import PolygonWithHoles, PolyLine, PolyLineNode, Vector2
-from kipy.proto.board import board_types_pb2 as bt
-from kipy.proto.common.types import base_types_pb2 as base
+from kipy.project import Project
+from kipy.project_types import TextVariables
+from kipy.proto.board import board_commands_pb2 as bc, board_pb2, board_types_pb2 as bt
+from kipy.proto.common.commands import project_commands_pb2 as pc
+from kipy.proto.common.types import base_types_pb2 as base, project_settings_pb2 as ps
 from shapely.geometry import LineString, Polygon
 from shapely.ops import polygonize, unary_union
 
@@ -336,3 +342,166 @@ def update_zone(board, zone_id: str, **props) -> dict:
         zone.island_mode = bt.IslandRemovalMode.Value("IRM_" + props["island_mode"].upper())
     board.update_items(zone)
     return next(z for z in list_zones(board) if z["id"] == zone_id)
+
+
+# ---------- board setup ----------
+
+# netclass board settings that are plain distances, as named in the API
+NETCLASS_DISTANCES = ("clearance", "track_width", "diff_pair_track_width", "diff_pair_gap", "diff_pair_via_gap")
+# via sizes live in padstacks: (field, stack, part)
+NETCLASS_VIAS = {"via_diameter": ("via_stack", "size"), "via_drill": ("via_stack", "drill"),
+                 "microvia_diameter": ("microvia_stack", "size"), "microvia_drill": ("microvia_stack", "drill")}
+NETCLASS_FIELDS = NETCLASS_DISTANCES + tuple(NETCLASS_VIAS) + ("color",)
+
+
+def _hex(c: base.Color) -> str:
+    return "#" + "".join(f"{round(v * 255):02x}" for v in (c.r, c.g, c.b, c.a))
+
+
+def _color(text: str) -> base.Color:
+    h = text.lstrip("#")
+    if len(h) not in (6, 8) or any(ch not in "0123456789abcdefABCDEF" for ch in h):
+        raise ValueError(f"color must be #RRGGBB or #RRGGBBAA, not {text!r}")
+    v = [int(h[i:i + 2], 16) / 255 for i in range(0, len(h), 2)] + [1.0]
+    return base.Color(r=v[0], g=v[1], b=v[2], a=v[3])
+
+
+def netclass_dict(nc: ps.NetClass) -> dict:
+    """One netclass in mm; a field that is None is not set on the class and comes from Default."""
+    b = nc.board
+    out = {"name": nc.name, "priority": nc.priority if nc.HasField("priority") else None}
+    for f in NETCLASS_DISTANCES:
+        out[f] = mm(getattr(b, f).value_nm) if b.HasField(f) else None
+    for f, (stack, part) in NETCLASS_VIAS.items():
+        s = getattr(b, stack)
+        if part == "size":
+            out[f] = mm(s.copper_layers[0].size.x_nm) if b.HasField(stack) and s.copper_layers else None
+        else:
+            out[f] = mm(s.drill.diameter.x_nm) if b.HasField(stack) and s.HasField("drill") else None
+    out["color"] = _hex(b.color) if b.HasField("color") else None
+    if nc.type == ps.NetClassType.NCT_IMPLICIT:
+        out["constituents"] = list(nc.constituents)
+    return out
+
+
+def patch_netclass(nc: ps.NetClass, values: dict) -> ps.NetClass:
+    """A copy of `nc` with `values` (mm) set; None leaves a field as it is."""
+    out = ps.NetClass()
+    out.CopyFrom(nc)
+    b = out.board
+    unknown = set(values) - set(NETCLASS_FIELDS) - {"priority"}
+    if unknown:
+        raise ValueError(f"unknown netclass fields: {sorted(unknown)}")
+    for f, v in values.items():
+        if v is None:
+            continue
+        if f == "priority":
+            out.priority = int(v)
+        elif f == "color":
+            b.color.CopyFrom(_color(v))
+        else:
+            if v <= 0:
+                raise ValueError(f"{f} must be positive, got {v}")
+            if f in NETCLASS_DISTANCES:
+                getattr(b, f).value_nm = nm(v)
+            else:
+                stack, part = NETCLASS_VIAS[f]
+                s = getattr(b, stack)
+                if part == "drill":
+                    s.drill.diameter.x_nm = s.drill.diameter.y_nm = nm(v)
+                else:
+                    if not s.copper_layers:
+                        s.copper_layers.add(layer=bt.BoardLayer.BL_F_Cu, shape=bt.PadStackShape.PSS_CIRCLE)
+                    s.copper_layers[0].size.x_nm = s.copper_layers[0].size.y_nm = nm(v)
+    d = netclass_dict(out)
+    for kind in ("via", "microvia"):
+        dia, drill = d[f"{kind}_diameter"], d[f"{kind}_drill"]
+        if dia is not None and drill is not None and drill >= dia:
+            raise ValueError(f"{kind} drill {drill} must be smaller than its diameter {dia}")
+    return out
+
+
+def _explicit_netclasses(board) -> list[ps.NetClass]:
+    reply = board.client.send(pc.GetNetClasses(), pc.NetClassesResponse)
+    return [nc for nc in reply.net_classes if nc.type != ps.NetClassType.NCT_IMPLICIT]
+
+
+def net_classes(board) -> list[dict]:
+    return [netclass_dict(nc) for nc in _explicit_netclasses(board)]
+
+
+def set_net_class(board, name: str, values: dict) -> dict:
+    """Create or edit one netclass; fields not named keep their value.
+
+    Always merge mode: in KiCad 10.0.7 a replace-mode SetNetClasses sent after a net's effective
+    class was looked up (read_model does that) leaves pcbnew busy forever. Merge sends only this
+    class, and only the fields it carries change, so it cannot unset a field.
+    """
+    current = next((nc for nc in _explicit_netclasses(board) if nc.name == name), None)
+    before = netclass_dict(current) if current else None
+    nc = patch_netclass(current or ps.NetClass(name=name, type=ps.NetClassType.NCT_EXPLICIT), values)
+    cmd = pc.SetNetClasses(merge_mode=base.MapMergeMode.MMM_MERGE)
+    cmd.net_classes.append(nc)
+    board.client.send(cmd, Empty)
+    after = next((c for c in net_classes(board) if c["name"] == name), None)
+    expected = netclass_dict(nc)
+    return {"created": before is None, "before": before, "after": after,
+            "verified": after is not None and all(after[k] == expected[k] for k in NETCLASS_FIELDS),
+            # KiCad caches each net's effective class and rebuilds it on save only
+            "note": "nets keep their old effective rules until the board is saved: call save_board "
+                    "before check_plan relies on the new values"}
+
+
+def _project(board) -> Project:
+    # Board.get_project() hands over the board's own DocumentSpecifier and Project() retypes it
+    # in place, after which every board call fails with "document is not open"
+    doc = base.DocumentSpecifier()
+    doc.CopyFrom(board.document)
+    return Project(board.client, doc)
+
+
+def text_variables(board) -> dict:
+    return dict(_project(board).get_text_variables().variables)
+
+
+def set_text_variables(board, values: dict, remove=()) -> dict:
+    project = _project(board)
+    if remove:
+        merged = {k: v for k, v in project.get_text_variables().variables.items() if k not in remove}
+        merged.update(values)
+        tv, mode = TextVariables(), base.MapMergeMode.MMM_REPLACE
+        tv.variables = merged
+    else:
+        tv, mode = TextVariables(), base.MapMergeMode.MMM_MERGE
+        tv.variables = values
+    project.set_text_variables(tv, mode)
+    return text_variables(board)
+
+
+ORIGINS = {"grid": bc.BoardOriginType.BOT_GRID, "drill": bc.BoardOriginType.BOT_DRILL}
+
+
+def origins(board) -> dict:
+    out = {}
+    for name, kind in ORIGINS.items():
+        v = board.get_origin(kind)
+        out[name] = [mm(v.x), mm(v.y)]
+    return out
+
+
+def set_origin(board, kind: str, x: float, y: float) -> dict:
+    if kind not in ORIGINS:
+        raise ValueError(f"origin must be one of {sorted(ORIGINS)}")
+    board.set_origin(ORIGINS[kind], _vec(x, y))
+    return origins(board)
+
+
+def graphics_defaults(board) -> dict:
+    out = {}
+    for cls, g in board.get_graphics_defaults().items():
+        t = g.proto.text
+        out[board_pb2.BoardLayerClass.Name(cls)[4:].lower()] = {
+            "line_width": mm(g.proto.line_thickness.value_nm),
+            "text_size": [mm(t.size.x_nm), mm(t.size.y_nm)], "text_thickness": mm(t.stroke_width.value_nm),
+            "italic": t.italic, "keep_upright": t.keep_upright}
+    return out

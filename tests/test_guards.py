@@ -35,3 +35,13 @@ def test_headless_refuses_a_board_open_in_kicad(tmp_path):
 def test_headless_rejects_non_boards(tmp_path):
     with pytest.raises(ValueError):
         Headless().start(str(tmp_path / "nope.kicad_sch"))
+
+
+def test_stopping_the_hidden_editor_removes_only_its_own_locks(tmp_path):
+    ours, theirs = tmp_path / "~x.kicad_pcb.lck", tmp_path / "~x.kicad_pro.lck"
+    ours.write_text("")
+    theirs.write_text("")
+    h = Headless()
+    h.locks = [ours]           # what start() found missing before pcbnew ran
+    h.stop()
+    assert not ours.exists() and theirs.exists()

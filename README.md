@@ -24,7 +24,13 @@ What it does today:
   The result is read back from KiCad.
 - **Real connectivity.** `net_islands` splits a net into the groups of copper that
   actually touch, zone fills included, so cut-off pads show up by name.
-- **Board setup the API allows live.** More copper layers, zone properties, refill, save.
+- **Board setup on the open board.** Netclass routing rules (clearance, track width, via and
+  diff pair sizes) changed live, text variables, origins, more copper layers, zone
+  properties, refill, save. Reading net classes and the stackup is left to Konnect.
+- **Board setup the API cannot reach, in the files.** Stackup, layer names and types, solder
+  mask and paste, via protection, violation severities, teardrop, length-tuning and graphics
+  defaults, netclass removal, written into `.kicad_pcb` / `.kicad_pro` while KiCad has the
+  project closed. See [TODO.md](TODO.md) for what is still missing.
 
 Viaduct leaves what Konnect already covers (schematic work, placement, DRC, exports) to
 Konnect. Routing helpers (via placement, fanout, point-to-point routing) come next and
@@ -40,6 +46,17 @@ ships the capability:
 | Batch copper edits in one commit, via deletion (`apply_plan`) | [#825](https://github.com/mixelpixx/Konnect/issues/825), [#500](https://github.com/mixelpixx/Konnect/issues/500) |
 | Zone deletion (`apply_plan` with zone ids) | [#431](https://github.com/mixelpixx/Konnect/issues/431) |
 | Live copper-layer expansion (`set_copper_layers`) | [#721](https://github.com/mixelpixx/Konnect/issues/721) |
+| Netclass edits on a board open in KiCad (`set_net_class`) | Konnect's `create_netclass` edits `.kicad_pro` and refuses while KiCad holds the project ([#791](https://github.com/mixelpixx/Konnect/issues/791), [#817](https://github.com/mixelpixx/Konnect/issues/817)); writing through `SetNetClasses` is named as a follow-up there but not filed. Diff pair fields: [#777](https://github.com/mixelpixx/Konnect/issues/777) |
+| Netclass removal, unsetting netclass fields (`edit_netclass_file`) | [#882](https://github.com/mixelpixx/Konnect/issues/882) |
+| Setting the physical stackup (`set_stackup`) | [#716](https://github.com/mixelpixx/Konnect/issues/716) |
+
+Removed because a Konnect release covers them: reading net classes and the physical stackup
+(`get_netclasses` and `get_board_stackup`, Konnect v0.13.0). Left to Konnect's file writers and
+not duplicated: constraints (`set_design_rules`), predefined sizes (`set_predefined_sizes`),
+creating netclasses and assigning nets (`create_netclass`, `assign_net_to_class`) and custom
+rules (`add_design_rule`). With no Konnect counterpart or issue: text variables, origins,
+layer names, solder mask and paste, via protection, violation severities, teardrop,
+length-tuning and graphics defaults.
 
 ## Tools
 
@@ -51,14 +68,25 @@ ships the capability:
 | `net_islands` | Groups of a net's copper that are joined; more than one group means a broken net |
 | `check_plan` | Checks a plan without writing: clearances per netclass, holes, board edge, nets, layers |
 | `apply_plan` | Re-checks, applies as one commit, refills zones, reads back |
+| `get_board_setup` | Copper layer count, text variables, origins, text and graphics defaults |
+| `set_net_class` | Creates a netclass or sets its clearance, track width, via, microvia and diff pair sizes |
+| `set_text_variables` | Adds, changes or removes project text variables |
+| `set_board_origin` | Moves the grid or drill/place origin |
 | `set_copper_layers` | Adds copper layers (never removes; needs `confirm`) |
+| `read_setup_files` | Board setup from the files: stackup, layers, mask and paste, severities, teardrops, defaults, netclasses |
+| `set_stackup` | Layer thickness, material, εr, loss tangent, color, finish, impedance control, edge connector and plating (file) |
+| `set_layer_names` | Layer names and copper layer types (file) |
+| `set_mask_and_paste` | Solder mask and paste clearances, via tenting, covering, plugging, capping, filling (file) |
+| `set_project_settings` | Violation severities, teardrop, length-tuning and text and graphics defaults (file) |
+| `edit_netclass_file` | Removes a netclass or unsets its fields so they come from Default (file) |
 | `set_zone_properties` | Name, priority, clearance, min thickness, island removal mode |
 | `refill_zones`, `save_board` | As named |
 | `open_headless` | Opens a board in a hidden PCB editor; every tool then targets it |
 | `close_headless` | Closes it, optionally saving; tools target the user's KiCad again |
 | `headless_status` | Whether a hidden editor is open, on which board |
 
-All coordinates and sizes are millimetres.
+All coordinates and sizes are millimetres. Tools marked (file) edit the project files and
+need the project closed in KiCad; see [Board setup in the files](#board-setup-in-the-files).
 
 ## Guarding against concurrent edits
 
@@ -92,6 +120,45 @@ KiCad 11 plans a built-in headless mode; KiCad 10 will never get one, which is w
 Viaduct runs the GUI on Xvfb today. Once KiCad 11 is released, `open_headless` will
 check the installed KiCad version and use the built-in headless mode on 11 or newer,
 keeping the Xvfb method for KiCad 10. The tools' behaviour stays the same either way.
+
+## Board setup
+
+`get_board_setup` returns the board setup Konnect does not read, plus a `not_in_api` list of
+the pages KiCad's API cannot reach (constraints, predefined sizes, netclass assignments,
+custom rules and more; details in [TODO.md](TODO.md)). Read net classes and the stackup with
+Konnect's `get_netclasses` and `get_board_stackup`.
+
+`set_net_class` changes only the fields it is given and reads the class back. KiCad keeps
+each net's effective rules until the board is saved, so call `save_board` before `check_plan`
+relies on new clearances. Netclass changes are project settings outside the undo history.
+The API cannot unset a netclass field, remove a class or assign nets to one: those stay in
+`edit_netclass_file` and Konnect's `assign_net_to_class`, which edit the project file while
+the project is closed in KiCad.
+
+### Board setup in the files
+
+Most of Board Setup is not in KiCad's API (details in [TODO.md](TODO.md)). The (file) tools
+write those settings into the `.kicad_pcb` and `.kicad_pro` instead, as Konnect does for
+its own file writers:
+
+- **KiCad must not have the project open.** It rewrites both files from memory when it saves,
+  which would silently undo the edit. A write refuses while `~<name>.kicad_pcb.lck` or
+  `~<name>.kicad_pro.lck` exists, and names the lock. A lock left by a crashed KiCad can be
+  deleted. `close_headless` removes the locks its hidden editor created.
+- **Dry run first.** Without `confirm=true` a tool only lists the changes; a file edit is not
+  in KiCad's undo history.
+- **Only the requested settings change.** The board file is edited in place: every other
+  byte stays as KiCad wrote it. Writes are atomic, refuse if the file changed meanwhile, and
+  are read back.
+- **KiCad 10 files only.** A board written by an older KiCad is refused; open and save it in
+  KiCad 10 first.
+- **Stackup.** A board without a stored stackup gets KiCad's own default (same thicknesses
+  and materials KiCad would use) with the changes applied, and the board thickness is set to
+  the stackup's total, as Board Setup does.
+
+Each tool was checked against KiCad 10.0.7: KiCad loads the edited files and keeps every
+value when it saves the board again; the stackup and netclasses were also read back over
+its API.
 
 ## Plan format
 
