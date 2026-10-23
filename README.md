@@ -104,6 +104,9 @@ therefore runs a real `pcbnew` on a virtual X display (`xvfb-run`), nobody sees 
   tables), so the user's KiCad can stay open on the original. `copy=false` opens the file
   itself and is refused while KiCad has it open: a second editor would hang on an
   invisible "file is locked" dialog.
+- It never reaches the user's screen: in a Wayland session GTK would otherwise ignore
+  Xvfb's `DISPLAY` and open the editor on the user's compositor, so `WAYLAND_DISPLAY` is
+  removed and `GDK_BACKEND=x11` is set.
 - Its socket lives under a short private `TMPDIR` (`/tmp/vdXXXX/t/kicad/api.sock`), apart
   from the user's `/tmp/kicad/api.sock` and under the ~108 character socket path limit,
   past which KiCad silently opens no socket.

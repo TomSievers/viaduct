@@ -30,6 +30,16 @@ def lock_file(board: Path) -> Path:
     return board.with_name(f"~{board.name}.lck")
 
 
+def hidden_env(tmpdir: Path) -> dict:
+    """The environment for the hidden pcbnew. xvfb-run only sets DISPLAY: in a Wayland session
+    GTK would still connect to the user's compositor (WAYLAND_DISPLAY, GDK_BACKEND=wayland)
+    and show the editor on their screen, so every route to Wayland is removed."""
+    env = dict(os.environ, TMPDIR=str(tmpdir), GDK_BACKEND="x11", XDG_SESSION_TYPE="x11")
+    for var in ("KICAD_API_SOCKET", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
+        env.pop(var, None)
+    return env
+
+
 class Headless:
     def __init__(self):
         self.proc: subprocess.Popen | None = None
@@ -80,8 +90,7 @@ class Headless:
         self.locks = [lk for lk in (lock_file(self.board), lock_file(self.board.with_suffix(".kicad_pro")))
                       if not lk.exists()]
         self.log = self.root / "pcbnew.log"
-        env = dict(os.environ, TMPDIR=str(self.root / "t"))
-        env.pop("KICAD_API_SOCKET", None)
+        env = hidden_env(self.root / "t")
         self.proc = subprocess.Popen(
             [xvfb, "-a", "-s", "-screen 0 1920x1080x24", pcbnew, str(self.board)],
             env=env, stdout=self.log.open("w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,

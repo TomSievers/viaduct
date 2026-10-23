@@ -2,7 +2,7 @@ import pytest
 from shapely.geometry import box
 
 from viaduct import geometry
-from viaduct.headless import Headless, lock_file
+from viaduct.headless import Headless, hidden_env, lock_file
 from viaduct.model import BoardModel, Copper
 
 
@@ -45,3 +45,12 @@ def test_stopping_the_hidden_editor_removes_only_its_own_locks(tmp_path):
     h.locks = [ours]           # what start() found missing before pcbnew ran
     h.stop()
     assert not ours.exists() and theirs.exists()
+
+
+def test_hidden_editor_cannot_reach_the_users_wayland_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("GDK_BACKEND", "wayland")
+    monkeypatch.setenv("KICAD_API_SOCKET", "/tmp/kicad/api.sock")
+    env = hidden_env(tmp_path)
+    assert "WAYLAND_DISPLAY" not in env and "KICAD_API_SOCKET" not in env
+    assert env["GDK_BACKEND"] == "x11" and env["TMPDIR"] == str(tmp_path)
