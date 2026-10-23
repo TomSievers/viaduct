@@ -1,5 +1,6 @@
 # Viaduct
 
+> [!WARNING]
 > **Warning: the tool set is not stable.** Tools may be added, changed or removed without
 > notice. A tool is removed once the same capability lands in a released version of
 > [Konnect](https://github.com/mixelpixx/Konnect).
