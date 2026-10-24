@@ -7,12 +7,19 @@ KiCad commit, so a single Ctrl+Z undoes it.
 
 from __future__ import annotations
 
+import atexit
+import importlib
 import json
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.lowlevel import NotificationOptions
+from mcp.server.stdio import stdio_server
 
 from viaduct import __version__, connectivity, kicad_io, plan as planmod, setup_files
 from viaduct.headless import Headless
@@ -484,8 +491,83 @@ def headless_status() -> dict:
     return headless.status()
 
 
+# The FastMCP instance serving stdio. After reload_server the tools come from a newer copy of
+# this module, whose own `mcp` never runs: each copy hands the live one on.
+_live: FastMCP | None = None
+
+
+def _source(source: str | None) -> Path:
+    path = source or os.environ.get("VIADUCT_SOURCE")
+    if not path:
+        raise ValueError("no source checkout: pass source, or start the server with VIADUCT_SOURCE set "
+                         "to the Viaduct repository")
+    root = Path(path).expanduser().resolve()
+    if not (root / "src" / "viaduct" / "server.py").exists():
+        raise ValueError(f"not a Viaduct checkout: {root}")
+    return root
+
+
+def _revision(root: Path) -> str | None:
+    git = subprocess.run(["git", "-C", str(root), "describe", "--always", "--dirty"],
+                         capture_output=True, text=True)
+    return git.stdout.strip() or None
+
+
+@mcp.tool()
+async def reload_server(ctx: Context, source: str | None = None, rebuild: bool = True) -> dict:
+    """Load the newest Viaduct code into the running server, without restarting the client.
+
+    source is the Viaduct repository (default: VIADUCT_SOURCE). rebuild=true first runs
+    `nix build` there, which runs the tests and refreshes result/bin/viaduct for the next start;
+    a failed build reloads nothing. The tools are then re-imported from source/src and the client
+    is told the tool list changed. An open hidden editor stays open. New dependencies still need
+    a restart.
+    """
+    root = _source(source)
+    built = None
+    if rebuild and (root / "flake.nix").exists():
+        nix = await anyio.run_process(["nix", "build"], cwd=root, check=False)
+        if nix.returncode != 0:
+            return {"reloaded": False, "reason": "nix build failed; the running version is unchanged",
+                    "log_tail": nix.stderr.decode(errors="replace")[-2000:]}
+        built = str((root / "result").resolve())
+
+    old = {name: mod for name, mod in sys.modules.items() if name == "viaduct" or name.startswith("viaduct.")}
+    for name in old:
+        del sys.modules[name]
+    sys.path.insert(0, str(root / "src"))
+    try:
+        new = importlib.import_module("viaduct.server")
+    except Exception as e:
+        for name in [n for n in sys.modules if n == "viaduct" or n.startswith("viaduct.")]:
+            del sys.modules[name]
+        sys.modules.update(old)
+        return {"reloaded": False, "reason": f"the new code does not import: {e!r}"}
+    finally:
+        sys.path.remove(str(root / "src"))
+
+    # the hidden editor stays open: the new module takes over its process and lock files
+    atexit.unregister(headless.stop)
+    new.headless.__dict__.update(headless.__dict__)
+    live = _live or mcp
+    new._live = live
+    live._tool_manager = new.mcp._tool_manager
+    await ctx.session.send_tool_list_changed()
+    return {"reloaded": True, "from": __version__, "to": new.__version__, "revision": _revision(root),
+            "built": built, "tools": len(live._tool_manager.list_tools()), "headless": new.headless.status()}
+
+
+async def _serve():
+    server = mcp._mcp_server
+    async with stdio_server() as (read, write):
+        # tools_changed lets reload_server tell the client to fetch the new tool list
+        await server.run(read, write, server.create_initialization_options(NotificationOptions(tools_changed=True)))
+
+
 def main():
-    mcp.run()
+    global _live
+    _live = mcp
+    anyio.run(_serve)
 
 
 if __name__ == "__main__":

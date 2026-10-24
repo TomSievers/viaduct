@@ -95,6 +95,7 @@ length-tuning and graphics defaults.
 | `open_headless` | Opens a board in a hidden PCB editor; every tool then targets it |
 | `close_headless` | Closes it, optionally saving; tools target the user's KiCad again |
 | `headless_status` | Whether a hidden editor is open, on which board |
+| `reload_server` | Rebuilds and loads the newest Viaduct code into the running server |
 
 All coordinates and sizes are millimetres. Tools marked (file) edit the project files and
 need the project closed in KiCad; see [Board setup in the files](#board-setup-in-the-files).
@@ -238,11 +239,19 @@ of an item the plan deletes is a `move_deleted` violation.
 
 ```sh
 nix build                     # result/bin/viaduct, runs the tests during the build
-claude mcp add --scope user viaduct -- $PWD/result/bin/viaduct
+claude mcp add --scope user -e VIADUCT_SOURCE=$PWD viaduct -- $PWD/result/bin/viaduct
 ```
 
 The server finds KiCad's socket the same way `kicad-python` does; set
 `KICAD_API_SOCKET` to override.
+
+### Updating a running server
+
+`reload_server` picks up new code without restarting Claude: it runs `nix build` in
+`VIADUCT_SOURCE` (tests included; a failed build reloads nothing), re-imports the tools from
+its `src`, and tells the client the tool list changed. `rebuild=false` skips the build and
+loads the working tree as it is. An open hidden editor stays open. New dependencies, or a
+change to how the server starts (`main`), still need a restart.
 
 ## Development
 
