@@ -21,7 +21,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.stdio import stdio_server
 
-from viaduct import __version__, connectivity, kicad_io, plan as planmod, setup_files
+from viaduct import __version__, connectivity, kicad_io, plan as planmod, setup_files, silk
 from viaduct.headless import Headless
 
 mcp = FastMCP("viaduct", instructions=(
@@ -288,6 +288,37 @@ def move_footprint_texts(moves: list[dict], limit: int = 200) -> dict:
     """
     result = kicad_io.edit_footprint_texts(session.board(), moves)
     return {**result, "items": result["items"][:limit], "truncated": len(result["items"]) > limit}
+
+
+@mcp.tool()
+def place_references(references: list[str] | None = None, sizes: list[float | None] | None = None,
+                     text_clearance: float = 0.5, pad_clearance: float = 0.15, silk_clearance: float = 0.12,
+                     edge_clearance: float = 0.35, max_gap: float = 1.2, rotate: bool = True,
+                     include_hidden: bool = False, hide_unplaced: bool = True, apply: bool = False,
+                     limit: int = 200) -> dict:
+    """Find a readable spot for every Reference on the silkscreen, and hide those that do not fit.
+
+    Each reference goes next to its own part (outside its courtyard, at most max_gap away, closer
+    to it than to any other part), clear of pads, other silkscreen, component bodies, the board
+    edge and the other references. Spots close to the part and horizontal at the current size
+    are tried first; then the smaller sizes, then vertical. sizes are character heights to try,
+    in order; null is the current size (default [null, 0.8]; keep the last at or above the
+    board's minimum text height). references limits the run to those parts; the others stay put
+    and are avoided. Hidden references stay hidden unless include_hidden.
+
+    Without apply this is a dry run: rows say where each reference would go, and moves is ready
+    for move_footprint_texts. apply=true moves them all in one KiCad commit (one Ctrl+Z) and
+    reads them back. Run DRC afterwards: positions use an estimate of the stroke font's extent.
+    """
+    rules = silk.Rules(text_clearance=text_clearance, pad_clearance=pad_clearance, silk_clearance=silk_clearance,
+                       edge_clearance=edge_clearance, max_gap=max_gap, rotate=rotate)
+    if sizes:
+        rules.sizes = tuple(sizes)
+    out = kicad_io.place_references(session.board(), rules, references, include_hidden, hide_unplaced, apply)
+    for key in ("rows", "moves"):
+        out["truncated"] = out.get("truncated", False) or len(out[key]) > limit
+        out[key] = out[key][:limit]
+    return out
 
 
 @mcp.tool()

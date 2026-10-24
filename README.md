@@ -30,6 +30,10 @@ What it does today:
 - **Moving text and graphics.** Footprint Reference/Value fields, free board text, text
   boxes, shapes and dimensions (fab notes, order-number markers, logos), without moving
   footprints or touching copper.
+- **Readable silkscreen.** `place_references` puts every Reference next to its own part, clear
+  of pads, other silkscreen, component bodies, the board edge and the other references,
+  shrinking or turning it only when it has to, and hides the ones that fit nowhere. All in
+  one commit, or as a dry run whose moves can be edited first.
 - **Board setup the API cannot reach, in the files.** Stackup, layer names and types, solder
   mask and paste, via protection, violation severities, teardrop, length-tuning and graphics
   defaults, netclass removal, written into `.kicad_pcb` / `.kicad_pro` while KiCad has the
@@ -53,6 +57,13 @@ ships the capability:
 | Netclass removal, unsetting netclass fields (`edit_netclass_file`) | [#882](https://github.com/mixelpixx/Konnect/issues/882) |
 | Setting the physical stackup (`set_stackup`) | [#716](https://github.com/mixelpixx/Konnect/issues/716) |
 | Moving a footprint's Reference/Value text (`move_footprint_text`) | [#829](https://github.com/mixelpixx/Konnect/issues/829) |
+
+Automatic reference placement (`place_references`) has no Konnect issue, and Konnect treats it
+as out of scope: on #829 the maintainer limits that tool to editing a given field, "not
+automatic silk placement". It stays in Viaduct; once #829 ships, its moves could be applied
+through Konnect's tool instead. `sizes` should stay at or above the board's minimum text
+height, which Konnect's `set_design_rules` gains in [#965](https://github.com/mixelpixx/Konnect/pull/965)
+([#960](https://github.com/mixelpixx/Konnect/issues/960)).
 
 Removed because a Konnect release covers them: reading net classes and the physical stackup
 (`get_netclasses` and `get_board_stackup`, Konnect v0.13.0). Left to Konnect's file writers and
@@ -79,6 +90,7 @@ length-tuning and graphics defaults.
 | `list_footprint_texts` | A footprint's fields and texts with ids, layer, position, rotation, size |
 | `move_footprint_text` | Moves or restyles a footprint's Reference, Value or other field, not the footprint |
 | `move_footprint_texts` | The same for many fields at once, each its own way, in one commit |
+| `place_references` | Finds a readable spot for every Reference (or the ones named) and hides those that fit nowhere; dry run by default |
 | `list_board_graphics` | Free board text, text boxes, shapes and dimensions with ids and bounding boxes |
 | `move_board_graphics` | Shifts free board items by dx/dy, optionally onto another non-copper layer |
 | `edit_board_graphics` | Moves many free board items at once, each its own way (offset, or text position, rotation, size), in one commit |

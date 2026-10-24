@@ -13,7 +13,7 @@ import re
 
 from google.protobuf.empty_pb2 import Empty
 from kipy import KiCad
-from kipy.board_types import (ArcTrack, BoardArc, BoardCircle, BoardPolygon, BoardRectangle,
+from kipy.board_types import (ArcTrack, BoardArc, BoardBezier, BoardCircle, BoardPolygon, BoardRectangle,
                               BoardSegment, BoardText, BoardTextBox, Field, Track, Via, Zone)
 from kipy.geometry import PolygonWithHoles, PolyLine, PolyLineNode, Vector2
 from kipy.project import Project
@@ -23,10 +23,11 @@ from kipy.proto.board import board_commands_pb2 as bc, board_pb2, board_types_pb
 from kipy.proto.common.commands import project_commands_pb2 as pc
 from kipy.proto.common.commands.editor_commands_pb2 import ItemStatusCode, UpdateItems, UpdateItemsResponse
 from kipy.proto.common.types import base_types_pb2 as base, project_settings_pb2 as ps
-from shapely.geometry import LineString, Polygon
+from shapely import affinity
+from shapely.geometry import LineString, Point, Polygon, box as shapely_box
 from shapely.ops import polygonize, unary_union
 
-from viaduct import geometry
+from viaduct import geometry, silk
 from viaduct.model import BoardModel, Copper, Hole
 from viaduct.plan import Plan
 
@@ -1000,3 +1001,138 @@ def move_footprint_text(board, reference: str, text: str = "Reference", x: float
     item = result["items"][0]
     return {"reference": reference, "before": item["before"], "after": item["after"],
             "verified": item["verified"], "footprint_untouched": item["footprint_untouched"]}
+
+
+# ---------- reference placement ----------
+
+def _shape_geom(s):
+    """A board or footprint graphic as the area it covers (mm), stroke included."""
+    a = s.attributes
+    width, filled = mm(a.stroke.width), a.fill.filled
+    if isinstance(s, BoardSegment):
+        return silk.stroke(LineString([(mm(s.start.x), mm(s.start.y)), (mm(s.end.x), mm(s.end.y))]), width)
+    if isinstance(s, BoardArc):
+        pts = geometry.arc_points((mm(s.start.x), mm(s.start.y)), (mm(s.mid.x), mm(s.mid.y)),
+                                  (mm(s.end.x), mm(s.end.y)))
+        return silk.stroke(LineString(pts), width)
+    if isinstance(s, BoardBezier):
+        p = [(mm(v.x), mm(v.y)) for v in (s.start, s.control1, s.control2, s.end)]
+        pts = [tuple((1 - t) ** 3 * p[0][k] + 3 * (1 - t) ** 2 * t * p[1][k] + 3 * (1 - t) * t ** 2 * p[2][k]
+                     + t ** 3 * p[3][k] for k in (0, 1)) for t in (i / 16 for i in range(17))]
+        return silk.stroke(LineString(pts), width)
+    if isinstance(s, BoardCircle):
+        c = (mm(s.center.x), mm(s.center.y))
+        area = Point(c).buffer(((mm(s.radius_point.x) - c[0]) ** 2 + (mm(s.radius_point.y) - c[1]) ** 2) ** 0.5)
+    elif isinstance(s, BoardRectangle):
+        x1, y1, x2, y2 = mm(s.top_left.x), mm(s.top_left.y), mm(s.bottom_right.x), mm(s.bottom_right.y)
+        area = shapely_box(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+    elif isinstance(s, BoardPolygon):
+        area = unary_union([_poly(p) for p in s.polygons])
+    else:
+        return None
+    return silk.stroke(area if filled else area.boundary, width) if not area.is_empty else None
+
+
+def _text_area(text_msg):
+    """The area a kiapi Text covers, from its position, size, stroke and angle."""
+    a = text_msg.attributes
+    x, y = mm(text_msg.position.x_nm), mm(text_msg.position.y_nm)
+    r = silk.text_box(text_msg.text, x, y, mm(a.size.y_nm), mm(a.stroke_width.value_nm), 0)
+    return affinity.rotate(r, -a.angle.value_degrees, origin=(x, y))
+
+
+def _silk_side(layer: int) -> str | None:
+    return {"F.SilkS": "F", "B.SilkS": "B"}.get(layer_name(layer))
+
+
+def silk_scene(board, include_hidden: bool = False) -> silk.SilkScene:
+    """Everything reference placement must avoid, read from the live board.
+
+    Labels are the Reference fields on a silkscreen layer (hidden ones only with
+    include_hidden); other visible silk text stays where it is and is avoided.
+    """
+    scene = silk.SilkScene(_outline(board), [])
+    for side in "FB":
+        for d in (scene.pads, scene.silk, scene.bodies, scene.texts, scene.anchors):
+            d[side] = []
+    model = read_model(board, with_zones=False)
+    for c in model.items:
+        for L, side in (("F.Cu", "F"), ("B.Cu", "B")):
+            if c.kind == "pad" and L in c.geom:
+                scene.pads[side].append(c.geom[L])
+
+    for fp in board.get_footprints():
+        side = "B" if layer_name(fp.layer) == "B.Cu" else "F"
+        courtyard, fab = [], []
+        for s in fp.definition.shapes:
+            L = layer_name(s.layer)
+            g = _shape_geom(s)
+            if g is None:
+                continue
+            if L.endswith(".CrtYd"):
+                courtyard.append(g)
+            elif L.endswith(".Fab"):
+                fab.append(g)
+            elif _silk_side(s.layer):
+                scene.silk[_silk_side(s.layer)].append(g)
+        pads = [c.geom[L] for c in model.items if c.kind == "pad" and c.ref and c.ref.split(".")[0]
+                == fp.reference_field.text.value for L in c.geom]
+        anchor = next((unary_union(g).bounds for g in (courtyard, pads, fab) if g), None)
+        if anchor is None:
+            x, y = mm(fp.position.x), mm(fp.position.y)
+            anchor = (x - 0.5, y - 0.5, x + 0.5, y + 0.5)
+        ref = fp.reference_field.text.value
+        scene.anchors[side].append((ref, anchor))
+        if fab:
+            scene.bodies[side].append(unary_union(fab).envelope)
+
+        for item in fp.texts_and_fields:
+            p = item.proto
+            if isinstance(item, Field):
+                t, layer, visible = p.text.text, p.text.layer, p.visible
+                tside = _silk_side(layer)
+                if tside is None:
+                    continue
+                if p.name == "Reference":
+                    if visible or include_hidden:
+                        a = t.attributes
+                        scene.labels.append(silk.Label(ref, tside, t.text, anchor, mm(a.size.y_nm),
+                                                       mm(a.stroke_width.value_nm)))
+                    continue
+                if visible:
+                    scene.texts[tside].append(_text_area(t))
+            elif isinstance(item, BoardText) and _silk_side(p.layer):
+                scene.texts[_silk_side(p.layer)].append(_text_area(p.text))
+
+    for s in board.get_shapes():
+        side = _silk_side(s.layer)
+        g = _shape_geom(s) if side else None
+        if g is not None:
+            scene.silk[side].append(g)
+    texts = [t for t in board.get_text() if _silk_side(t.proto.layer)]
+    for t, b in zip(texts, board.get_item_bounding_box(texts) if texts else []):
+        if b is not None:
+            x1, y1, x2, y2 = _box(b)
+            scene.texts[_silk_side(t.proto.layer)].append(Polygon([(x1, y1), (x2, y1), (x2, y2), (x1, y2)]))
+    return scene
+
+
+def place_references(board, rules: silk.Rules, references: list[str] | None = None,
+                     include_hidden: bool = False, hide_unplaced: bool = True, apply: bool = False) -> dict:
+    """Find a readable spot for each Reference (silk.place) and, with apply, move them all in
+    one commit; references that fit nowhere are hidden when hide_unplaced."""
+    scene = silk_scene(board, include_hidden)
+    known = {lb.ref for lb in scene.labels}
+    if references:
+        missing = sorted(set(references) - known)
+        if missing:
+            raise ValueError(f"no Reference on a silkscreen layer for {missing}"
+                             + ("" if include_hidden else " (hidden ones need include_hidden=true)"))
+    rows = silk.place(scene, rules, references)
+    planned = silk.moves(rows, hide_unplaced)
+    out = {"placed": sum(r["placed"] for r in rows), "unplaced": [r["reference"] for r in rows if not r["placed"]],
+           "hidden": hide_unplaced, "rows": rows, "moves": planned, "applied": False}
+    if apply and planned:
+        result = edit_footprint_texts(board, planned, "Viaduct: place references")
+        out.update(applied=True, verified=result["verified"], failed=result["failed"])
+    return out
