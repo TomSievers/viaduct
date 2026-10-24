@@ -7,8 +7,14 @@ A plan is plain JSON in millimetres:
       "tracks": [{"net": "GND", "layer": "F.Cu", "start": [x, y], "end": [x, y], "width": 0.25}],
       "vias":   [{"net": "GND", "at": [x, y], "diameter": 0.6, "drill": 0.3}],
       "zones":  [{"net": "GND", "layer": "In1.Cu", "outline": [[x, y], ...],
-                  "name": "GND_In1", "priority": 0, "clearance": 0.2, "min_thickness": 0.2}]
+                  "name": "GND_In1", "priority": 0, "clearance": 0.2, "min_thickness": 0.2}],
+      "field_moves":   [{"reference": "R1", "text": "Reference", "dx": 0, "dy": -1.2}],
+      "graphic_moves": [{"id": "<uuid>", "x": 120, "y": 80, "rotation": 90}]
     }
+
+field_moves and graphic_moves take the entries of move_footprint_texts and edit_board_graphics.
+They are checked against the live board by kicad_io (prepare_fields, prepare_graphics); here
+only conflicts inside the plan are checked.
 
 Tracks may also be written {"x1", "y1", "x2", "y2", "w"} and vias {"x", "y"}.
 """
@@ -72,10 +78,13 @@ class Plan:
     tracks: list[NewTrack] = field(default_factory=list)
     vias: list[NewVia] = field(default_factory=list)
     zones: list[NewZone] = field(default_factory=list)
+    field_moves: list[dict] = field(default_factory=list)
+    graphic_moves: list[dict] = field(default_factory=list)
 
     def summary(self) -> dict:
-        return {"delete": len(self.delete), "tracks": len(self.tracks),
-                "vias": len(self.vias), "zones": len(self.zones)}
+        return {"delete": len(self.delete), "tracks": len(self.tracks), "vias": len(self.vias),
+                "zones": len(self.zones), "field_moves": len(self.field_moves),
+                "graphic_moves": len(self.graphic_moves)}
 
 
 def _pt(d: dict, key: str, xk: str, yk: str) -> tuple[float, float]:
@@ -85,7 +94,8 @@ def _pt(d: dict, key: str, xk: str, yk: str) -> tuple[float, float]:
 
 
 def parse(data: dict, default_via=(0.6, 0.3), default_width=0.25) -> Plan:
-    unknown = set(data) - {"delete", "tracks", "segs", "vias", "zones", "fails", "ripped"}
+    unknown = set(data) - {"delete", "tracks", "segs", "vias", "zones", "fails", "ripped",
+                           "field_moves", "graphic_moves"}
     if unknown:
         raise ValueError(f"unknown plan keys: {sorted(unknown)}")
     plan = Plan(delete=[str(u) for u in data.get("delete", [])])
@@ -102,6 +112,11 @@ def parse(data: dict, default_via=(0.6, 0.3), default_width=0.25) -> Plan:
         plan.zones.append(NewZone(z["net"], z["layer"], [tuple(map(float, p)) for p in z["outline"]],
                                   z.get("name", ""), int(z.get("priority", 0)),
                                   z.get("clearance"), z.get("min_thickness")))
+    for key in ("field_moves", "graphic_moves"):
+        moves = data.get(key, [])
+        if not isinstance(moves, list) or not all(isinstance(m, dict) for m in moves):
+            raise ValueError(f"{key} must be a list of objects")
+        setattr(plan, key, [dict(m) for m in moves])
     return plan
 
 
@@ -117,6 +132,10 @@ def check(model: BoardModel, plan: Plan, edge_clearance: float = 0.3,
     out: list[dict] = []
     layers = layers or model.copper_layers
     deleted = set(plan.delete)
+
+    for i, m in enumerate(plan.graphic_moves):
+        if m.get("id") in deleted:
+            out.append({"rule": "move_deleted", "item": f"graphic_moves[{i}]", "id": m.get("id")})
 
     for uid in plan.delete:
         item = model.by_id.get(uid)

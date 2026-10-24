@@ -62,6 +62,19 @@ Also missing from the API:
   proto directly.
 - **kicad-python 0.5 does not wrap `SetNetClasses`** (the command and messages are there);
   Viaduct sends it directly.
+- **KiCad 10.0.7: repeated API edits of a footprint's free texts are lost.** Pushing a
+  commit swaps a footprint's children into the undo copy (`SwapItemData` in
+  `board_commit.cpp`), while `BOARD::ResolveItem`'s id cache keeps pointing at the old
+  objects, which still carry the same ids. The next `UpdateItems` for such a text modifies
+  the undo copy, reports success, and changes nothing on the board. Fields are not affected.
+  Reproduce: `UpdateItems` a footprint's `${REFERENCE}` text twice (container = footprint);
+  only the first lands. `move_footprint_text` therefore refuses free footprint texts; worth
+  reporting upstream.
+- **kicad-python 0.5: `BoardPolygon.proto` re-packs from the wrapper's own point list**, so
+  edits made to the proto are overwritten when it is read again. Viaduct edits copies of
+  item protos and sends them with its own `UpdateItems`.
+- **Moving copper text and shapes** is refused: it would need the clearance checks of
+  `check_plan`, which does not model text yet.
 - **Fixed in Viaduct: the hidden editor left KiCad's lock files behind.** pcbnew is stopped
   with a signal, so `close_headless` after `open_headless(copy=false)` left
   `~<name>.kicad_pcb.lck` and `~<name>.kicad_pro.lck` next to the user's files: KiCad then

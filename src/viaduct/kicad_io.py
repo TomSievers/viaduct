@@ -8,17 +8,20 @@ All public values are millimetres; KiCad's API uses nanometres.
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 from google.protobuf.empty_pb2 import Empty
 from kipy import KiCad
 from kipy.board_types import (ArcTrack, BoardArc, BoardCircle, BoardPolygon, BoardRectangle,
-                              BoardSegment, Track, Via, Zone)
+                              BoardSegment, BoardText, BoardTextBox, Field, Track, Via, Zone)
 from kipy.geometry import PolygonWithHoles, PolyLine, PolyLineNode, Vector2
 from kipy.project import Project
 from kipy.project_types import TextVariables
+from kipy.util import pack_any
 from kipy.proto.board import board_commands_pb2 as bc, board_pb2, board_types_pb2 as bt
 from kipy.proto.common.commands import project_commands_pb2 as pc
+from kipy.proto.common.commands.editor_commands_pb2 import ItemStatusCode, UpdateItems, UpdateItemsResponse
 from kipy.proto.common.types import base_types_pb2 as base, project_settings_pb2 as ps
 from shapely.geometry import LineString, Polygon
 from shapely.ops import polygonize, unary_union
@@ -294,14 +297,50 @@ def build_items(board, plan: Plan) -> list:
     return out
 
 
+def check_moves(board, plan: Plan) -> list[dict]:
+    """The plan's field and graphic moves, checked against the live board."""
+    out = []
+    for key, prepare in (("field_moves", prepare_fields), ("graphic_moves", prepare_graphics)):
+        moves = getattr(plan, key)
+        if moves:
+            out += [{"rule": key[:-1], "detail": e} for e in prepare(board, moves)[1]]
+    return out
+
+
+def plan_token(board, model: BoardModel, plan: Plan) -> str:
+    """The board_token of a plan: the copper fingerprint, plus every text and graphic the plan
+    moves, so apply_plan refuses when one of them was changed since check_plan (a dx/dy would
+    otherwise stack on someone else's move). Plans without moves keep the plain fingerprint."""
+    if not plan.field_moves and not plan.graphic_moves:
+        return model.fingerprint()
+    h = hashlib.sha1(model.fingerprint().encode())
+    graphics = _graphics(board) if plan.graphic_moves else {}
+    for m in plan.graphic_moves:
+        it = graphics.get(m.get("id"))
+        h.update(it[1].proto.SerializeToString(deterministic=True) if it else b"missing")
+    by_ref = _footprints_by_reference(board) if plan.field_moves else {}
+    for m in plan.field_moves:
+        fps = by_ref.get(m.get("reference"), [])
+        name = str(m.get("text", "Reference"))
+        hit = [p for r, p in (_footprint_texts(fps[0]) if len(fps) == 1 else [])
+               if (r["name"] or "").lower() == name.lower() or r["id"] == name]
+        h.update(hit[0].SerializeToString(deterministic=True) if hit else b"missing")
+    return h.hexdigest()[:16]
+
+
 def apply(board, plan: Plan, message: str) -> dict:
-    """Delete and create in one commit, then read back what KiCad really holds."""
+    """Delete, create and move in one commit, then read back what KiCad really holds."""
     items = build_items(board, plan)
+    fields, field_errors = prepare_fields(board, plan.field_moves) if plan.field_moves else ([], [])
+    graphics, graphic_errors = prepare_graphics(board, plan.graphic_moves) if plan.graphic_moves else ([], [])
+    _refuse(field_errors + graphic_errors)
+    before = graphics_boxes(board, graphics)
     commit = board.begin_commit()
     try:
         if plan.delete:
             board.remove_items_by_id([base.KIID(value=u) for u in plan.delete])
         created = board.create_items(items) if items else []
+        _send(board, field_requests(fields) + [(None, [p for _, _, _, p, _, _ in graphics])])
         board.push_commit(commit, message)
     except Exception:
         board.drop_commit(commit)
@@ -316,6 +355,8 @@ def apply(board, plan: Plan, message: str) -> dict:
         "deleted": len(plan.delete),
         "deleted_still_present": [u for u in plan.delete if u in live],
         "created_ids": created_ids,
+        "field_moves": verify_fields(board, fields),
+        "graphic_moves": verify_graphics(board, graphics, before),
     }
 
 
@@ -505,3 +546,457 @@ def graphics_defaults(board) -> dict:
             "text_size": [mm(t.size.x_nm), mm(t.size.y_nm)], "text_thickness": mm(t.stroke_width.value_nm),
             "italic": t.italic, "keep_upright": t.keep_upright}
     return out
+
+
+# ---------- moving text and graphics ----------
+
+def translate(msg, dx: int, dy: int) -> None:
+    """Shift every point of a board item message by (dx, dy) nm, in place. Text sizes
+    (attributes.size) are the only other Vector2 fields in graphics and stay as they are."""
+    for f, v in msg.ListFields():
+        if f.message_type is None or f.name == "size":
+            continue
+        for sub in (v if f.is_repeated else [v]):
+            if f.message_type.full_name == "kiapi.common.types.Vector2":
+                sub.x_nm += dx
+                sub.y_nm += dy
+            else:
+                translate(sub, dx, dy)
+
+
+def _box(b) -> list[float] | None:
+    return None if b is None else [mm(b.pos.x), mm(b.pos.y), mm(b.pos.x + b.size.x), mm(b.pos.y + b.size.y)]
+
+
+def _check_layer(board, name: str) -> int:
+    lid = layer_id(name)
+    if is_copper(lid):
+        raise ValueError(f"{name} is copper: text and graphics on copper are copper, use check_plan/apply_plan")
+    if lid not in board.get_enabled_layers():
+        raise ValueError(f"{name} is not enabled on this board")
+    return lid
+
+
+def _send(board, requests: list[tuple[str | None, list]]) -> None:
+    """Send UpdateItems requests; the caller holds the commit. Each request is
+    (container, protos): KiCad takes one container per request, so the fields of different
+    footprints go in separate requests. kipy's wrappers re-pack some items from their own cached
+    geometry when .proto is read (polygons), so edits go on copies sent as they are."""
+    for container, protos in requests:
+        if not protos:
+            continue
+        cmd = UpdateItems()
+        cmd.header.document.CopyFrom(board.document)
+        if container:
+            cmd.header.container.value = container
+        cmd.items.extend(pack_any(p) for p in protos)
+        reply = board.client.send(cmd, UpdateItemsResponse)
+        failed = [r.status.error_message or ItemStatusCode.Name(r.status.code)
+                  for r in reply.updated_items if r.status.code != ItemStatusCode.ISC_OK]
+        if failed:
+            raise RuntimeError(f"KiCad refused the update: {failed}")
+
+
+def _update(board, requests: list[tuple[str | None, list]], message: str) -> None:
+    """_send inside one commit (one undo step)."""
+    commit = board.begin_commit()
+    try:
+        _send(board, requests)
+        board.push_commit(commit, message)
+    except Exception:
+        board.drop_commit(commit)
+        raise
+
+
+def _copy(it):
+    p = type(it.proto)()
+    p.CopyFrom(it.proto)
+    return p
+
+
+def _locked(board_text_msg) -> bool:
+    return board_text_msg.locked == base.LockedState.LS_LOCKED
+
+
+def _refuse(errors: list[str]) -> None:
+    """Batches are all or nothing: report every problem, write nothing."""
+    if errors:
+        raise ValueError("nothing was changed:\n" + "\n".join(errors))
+
+
+def _position(move: dict, where: str, errors: list[str]) -> tuple[str | None, tuple[float, float] | None]:
+    """("abs" | "rel" | None, (x, y)) from a move's x/y or dx/dy."""
+    has_abs, has_rel = ("x" in move or "y" in move), ("dx" in move or "dy" in move)
+    if has_abs and has_rel:
+        errors.append(f"{where}: pass x and y, or dx and dy, not both")
+    elif has_abs:
+        if "x" not in move or "y" not in move:
+            errors.append(f"{where}: pass both x and y")
+        else:
+            return "abs", (float(move["x"]), float(move["y"]))
+    elif has_rel:
+        return "rel", (float(move.get("dx", 0.0)), float(move.get("dy", 0.0)))
+    return None, None
+
+
+def _style(t, move: dict, where: str, errors: list[str]) -> None:
+    """rotation, size and thickness of a text (kiapi Text) from a move."""
+    if move.get("rotation") is not None:
+        t.attributes.angle.value_degrees = float(move["rotation"])
+    for key in ("size", "thickness"):
+        v = move.get(key)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+            errors.append(f"{where}: {key} must be a positive number")
+        elif key == "size":
+            t.attributes.size.x_nm = t.attributes.size.y_nm = nm(v)
+        else:
+            t.attributes.stroke_width.value_nm = nm(v)
+
+
+def _graphics(board) -> dict[str, tuple[str, object]]:
+    """Free board text, text boxes, shapes and dimensions (not footprint children) by id."""
+    out = {}
+    for t in board.get_text():
+        out[t.id.value] = ("textbox" if isinstance(t, BoardTextBox) else "text", t)
+    for s in board.get_shapes():
+        out[s.id.value] = (type(s).__name__.removeprefix("Board").lower(), s)
+    for d in board.get_dimensions():
+        out[d.id.value] = ("dimension", d)
+    return out
+
+
+def _graphic_text(kind: str, p) -> str | None:
+    if kind == "text":
+        return p.text.text
+    if kind == "textbox":
+        return p.textbox.text
+    if kind == "dimension":
+        return p.text.text
+    return None
+
+
+def list_graphics(board, layer: str | None = None, kind: str | None = None, bbox: list[float] | None = None,
+                  contains: str | None = None) -> list[dict]:
+    items = [(i, k, it) for i, (k, it) in _graphics(board).items()
+             if (kind is None or k == kind) and (layer is None or layer_name(it.proto.layer) == layer)]
+    boxes = board.get_item_bounding_box([it for _, _, it in items]) if items else []
+    rows = []
+    for (i, k, it), b in zip(items, boxes):
+        box, text = _box(b), _graphic_text(k, it.proto)
+        if bbox and box and (box[2] < bbox[0] or box[0] > bbox[2] or box[3] < bbox[1] or box[1] > bbox[3]):
+            continue
+        if contains and (text is None or contains.lower() not in text.lower()):
+            continue
+        rows.append({"id": i, "kind": k, "layer": layer_name(it.proto.layer), "text": text, "bbox": box,
+                     "locked": _locked(it.proto)})
+    return rows
+
+
+GRAPHIC_MOVE_KEYS = {"id", "dx", "dy", "x", "y", "rotation", "size", "layer"}
+
+
+def prepare_graphics(board, moves: list[dict], include_locked: bool = False) -> tuple[list, list[str]]:
+    """Check graphic moves against the board and build the edited copies.
+
+    Returns (plan, errors); plan rows are (id, kind, item, edited proto, mode, xy). Nothing is
+    sent: edit_graphics and apply_plan do that.
+    """
+    found = _graphics(board)
+    errors, plan, seen = [], [], set()
+    enabled = board.get_enabled_layers()
+    for n, move in enumerate(moves):
+        where = f"move {n} ({move.get('id')})"
+        unknown = set(move) - GRAPHIC_MOVE_KEYS
+        if unknown:
+            errors.append(f"{where}: unknown keys {sorted(unknown)}")
+            continue
+        i = move.get("id")
+        if i not in found:
+            errors.append(f"{where}: no board text, shape or dimension with this id "
+                          "(footprint fields move with move_footprint_texts)")
+            continue
+        if i in seen:
+            errors.append(f"{where}: this id is already moved by an earlier move")
+            continue
+        seen.add(i)
+        kind, it = found[i]
+        p = _copy(it)
+        if is_copper(p.layer):
+            errors.append(f"{where}: on {layer_name(p.layer)}; copper text and shapes are copper, and moving "
+                          "them here would skip the clearance checks")
+            continue
+        if _locked(p) and not include_locked:
+            errors.append(f"{where}: locked; pass include_locked=true to move it anyway")
+            continue
+        mode, xy = _position(move, where, errors)
+        if (mode == "abs" or any(move.get(k) is not None for k in ("rotation", "size"))) and kind != "text":
+            errors.append(f"{where}: x/y, rotation and size apply to texts; a {kind} moves with dx/dy")
+            continue
+        if mode == "rel":
+            translate(p, nm(xy[0]), nm(xy[1]))
+        elif mode == "abs":
+            p.text.position.x_nm, p.text.position.y_nm = nm(xy[0]), nm(xy[1])
+        if kind == "text":
+            _style(p.text, move, where, errors)
+        if move.get("layer"):
+            try:
+                lid = layer_id(move["layer"])
+            except ValueError:
+                errors.append(f"{where}: unknown layer {move['layer']!r}")
+                continue
+            if is_copper(lid) or lid not in enabled:
+                errors.append(f"{where}: {move['layer']} is copper or not enabled")
+                continue
+            p.layer = lid
+        if mode is None and p == it.proto:
+            errors.append(f"{where}: nothing to change")
+            continue
+        plan.append((i, kind, it, p, mode, xy))
+    return plan, errors
+
+
+def graphics_boxes(board, plan: list) -> list:
+    return [_box(b) for b in board.get_item_bounding_box([it for _, _, it, *_ in plan])] if plan else []
+
+
+def verify_graphics(board, plan: list, before: list) -> dict:
+    """Read the moved items back and compare them with what was sent."""
+    if not plan:
+        return {"moved": 0, "verified": True, "failed": [], "items": []}
+    now = _graphics(board)
+    after = [_box(b) for b in board.get_item_bounding_box([now[i][1] for i, *_ in plan])]
+    rows = []
+    for (i, kind, _, p, mode, xy), b, a in zip(plan, before, after):
+        live = now[i][1].proto
+        ok = live.layer == p.layer
+        if mode == "rel":
+            ok &= b is not None and a is not None and all(abs(a[j] - b[j] - xy[j % 2]) < 1e-3 for j in range(4))
+        if kind == "text":
+            ok &= _text_row("text", None, live, live.text) == _text_row("text", None, p, p.text)
+        rows.append({"id": i, "kind": kind, "layer": layer_name(live.layer), "before": b, "after": a, "verified": ok})
+    return {"moved": len(rows), "verified": all(r["verified"] for r in rows),
+            "failed": [r["id"] for r in rows if not r["verified"]], "items": rows}
+
+
+def edit_graphics(board, moves: list[dict], include_locked: bool = False,
+                  message: str = "Viaduct: move graphics") -> dict:
+    """Move free board items, each its own way, in one commit.
+
+    A move is {"id", "dx", "dy"} for any item, or {"id", "x", "y", "rotation", "size"} for a
+    text (absolute), plus an optional "layer" (not copper). Every move is checked first; one
+    bad move means nothing is written.
+    """
+    if not moves:
+        raise ValueError("pass at least one move (list_board_graphics shows the ids)")
+    plan, errors = prepare_graphics(board, moves, include_locked)
+    _refuse(errors)
+    before = graphics_boxes(board, plan)
+    _update(board, [(None, [p for _, _, _, p, _, _ in plan])], message)
+    return verify_graphics(board, plan, before)
+
+
+def move_graphics(board, ids: list[str], dx: float, dy: float, layer: str | None = None,
+                  include_locked: bool = False) -> dict:
+    """Shift several free board items by the same offset."""
+    if not ids:
+        raise ValueError("pass the ids of the items to move (list_board_graphics shows them)")
+    return edit_graphics(board, [{"id": i, "dx": dx, "dy": dy, **({"layer": layer} if layer else {})} for i in ids],
+                         include_locked)
+
+
+def set_board_text(board, text_id: str, x: float | None = None, y: float | None = None,
+                   rotation: float | None = None, layer: str | None = None, size: float | None = None) -> dict:
+    """Place one free board text at an absolute position and angle."""
+    move = {"id": text_id, **{k: v for k, v in (("x", x), ("y", y), ("rotation", rotation), ("layer", layer),
+                                                ("size", size)) if v is not None}}
+    result = edit_graphics(board, [move], message="Viaduct: place board text")
+    live = _graphics(board)[text_id][1].proto
+    return {**_text_row("text", None, live, live.text), "verified": result["verified"]}
+
+
+# footprint text
+
+def _footprints_by_reference(board) -> dict[str, list]:
+    out: dict[str, list] = {}
+    for f in board.get_footprints():
+        out.setdefault(f.reference_field.text.value, []).append(f)
+    return out
+
+
+def _footprint(board, reference: str):
+    fps = _footprints_by_reference(board).get(reference, [])
+    if not fps:
+        raise ValueError(f"no footprint with reference {reference!r}")
+    if len(fps) > 1:
+        raise ValueError(f"{len(fps)} footprints share reference {reference!r}; annotate the board first")
+    return fps[0]
+
+
+def _text_row(kind: str, name: str | None, board_text, text) -> dict:
+    a = text.attributes
+    return {"kind": kind, "name": name, "id": board_text.id.value, "text": text.text,
+            "layer": layer_name(board_text.layer), "position": [mm(text.position.x_nm), mm(text.position.y_nm)],
+            "rotation": round(a.angle.value_degrees, 6), "size": [mm(a.size.x_nm), mm(a.size.y_nm)],
+            "thickness": mm(a.stroke_width.value_nm), "locked": _locked(board_text)}
+
+
+def _field_row(p) -> dict:
+    return {**_text_row("field", p.name, p.text, p.text.text), "visible": p.visible, "movable": True}
+
+
+def _footprint_texts(fp) -> list[tuple[dict, object]]:
+    """(row, proto) for every field and free text of a footprint, fields first."""
+    out, seen = [], set()
+    for item in fp.texts_and_fields:
+        p = item.proto
+        if isinstance(item, Field):
+            row = _field_row(p)
+        elif isinstance(item, BoardText):
+            row = {**_text_row("text", None, p, p.text), "movable": False}
+        else:
+            continue
+        if row["id"] not in seen:
+            seen.add(row["id"])
+            out.append((row, p))
+    return sorted(out, key=lambda rp: rp[0]["kind"] != "field")
+
+
+def footprint_texts(board, reference: str) -> dict:
+    fp = _footprint(board, reference)
+    return {"reference": reference, "footprint_id": fp.id.value, "footprint_layer": layer_name(fp.layer),
+            "footprint_position": [mm(fp.position.x), mm(fp.position.y)],
+            "footprint_rotation": round(fp.orientation.degrees, 6),
+            "texts": [row for row, _ in _footprint_texts(fp)]}
+
+
+FIELD_MOVE_KEYS = {"reference", "text", "dx", "dy", "x", "y", "rotation", "layer", "visible", "size", "thickness"}
+
+
+def prepare_fields(board, moves: list[dict]) -> tuple[list, list[str]]:
+    """Check footprint field moves against the board and build the edited copies.
+
+    Returns (plan, errors); plan rows are (reference, footprint, row before, edited proto).
+    Nothing is sent: edit_footprint_texts and apply_plan do that.
+
+    A move is {"reference", "text" (field name or id, default Reference), "x"/"y" or "dx"/"dy",
+    "rotation", "layer", "visible", "size", "thickness"}. Each field is sent on its own with its
+    footprint as container, so KiCad edits it in place; sending the whole footprint back would
+    make KiCad re-create the footprint and drop its (units ...) block on save (Konnect #941).
+    Free texts inside a footprint are refused: KiCad 10.0.7 swaps them into the undo copy on
+    every commit while its item-id cache keeps pointing at them, so later edits are silently
+    lost.
+    """
+    by_ref = _footprints_by_reference(board)
+    enabled = board.get_enabled_layers()
+    errors, plan, seen = [], [], set()
+    for n, move in enumerate(moves):
+        ref, name = move.get("reference"), move.get("text", "Reference")
+        where = f"move {n} ({ref} {name})"
+        unknown = set(move) - FIELD_MOVE_KEYS
+        if unknown:
+            errors.append(f"{where}: unknown keys {sorted(unknown)}")
+            continue
+        fps = by_ref.get(ref, [])
+        if len(fps) != 1:
+            errors.append(f"{where}: " + ("no footprint with this reference" if not fps else
+                                          f"{len(fps)} footprints share this reference; annotate the board first"))
+            continue
+        fp = fps[0]
+        entries = _footprint_texts(fp)
+        match = [(r, p) for r, p in entries if (r["name"] or "").lower() == str(name).lower()] or \
+                [(r, p) for r, p in entries if r["id"] == name]
+        if not match:
+            errors.append(f"{where}: no such field; it has {[r['name'] or r['id'] for r, _ in entries]}")
+            continue
+        row, live = match[0]
+        if row["kind"] != "field":
+            errors.append(f"{where}: free text {row['text']!r} inside the footprint cannot be moved reliably "
+                          "through KiCad's API (KiCad drops repeated edits of them); move a field instead")
+            continue
+        if row["id"] in seen:
+            errors.append(f"{where}: this field is already moved by an earlier move")
+            continue
+        seen.add(row["id"])
+        if row["locked"]:
+            errors.append(f"{where}: locked")
+            continue
+        p = type(live)()
+        p.CopyFrom(live)
+        t = p.text.text
+        mode, xy = _position(move, where, errors)
+        if mode == "abs":
+            t.position.x_nm, t.position.y_nm = nm(xy[0]), nm(xy[1])
+        elif mode == "rel":
+            t.position.x_nm += nm(xy[0])
+            t.position.y_nm += nm(xy[1])
+        _style(t, move, where, errors)
+        if move.get("layer"):
+            try:
+                lid = layer_id(move["layer"])
+            except ValueError:
+                errors.append(f"{where}: unknown layer {move['layer']!r}")
+                continue
+            if is_copper(lid) or lid not in enabled:
+                errors.append(f"{where}: {move['layer']} is copper or not enabled")
+                continue
+            p.text.layer = lid
+        if move.get("visible") is not None:
+            p.visible = bool(move["visible"])
+        plan.append((ref, fp, row, p))
+    return plan, errors
+
+
+def field_requests(plan: list) -> list[tuple[str, list]]:
+    """One UpdateItems request per footprint, the footprint as container."""
+    requests: dict[str, list] = {}
+    for _, fp, _, p in plan:
+        requests.setdefault(fp.id.value, []).append(p)
+    return list(requests.items())
+
+
+def verify_fields(board, plan: list) -> dict:
+    """Read the moved fields back; the footprints must be where they were."""
+    if not plan:
+        return {"moved": 0, "verified": True, "failed": [], "items": []}
+    now = {f.id.value: f for f in board.get_footprints()}
+    rows = []
+    for ref, fp, row, p in plan:
+        live_fp = now.get(fp.id.value)
+        after = next((r for r, _ in _footprint_texts(live_fp) if r["id"] == row["id"]), None) if live_fp else None
+        untouched = live_fp is not None and (
+            live_fp.position.x == fp.position.x and live_fp.position.y == fp.position.y
+            and live_fp.orientation.degrees == fp.orientation.degrees and live_fp.layer == fp.layer
+            and len(live_fp.definition.pads) == len(fp.definition.pads))
+        rows.append({"reference": ref, "field": row["name"], "before": row, "after": after,
+                     "verified": after == _field_row(p), "footprint_untouched": untouched})
+    return {"moved": len(rows), "verified": all(r["verified"] and r["footprint_untouched"] for r in rows),
+            "failed": [f"{r['reference']} {r['field']}" for r in rows if not (r["verified"] and r["footprint_untouched"])],
+            "items": rows}
+
+
+def edit_footprint_texts(board, moves: list[dict], message: str = "Viaduct: move footprint text") -> dict:
+    """Move or restyle footprint fields, each its own way, in one commit, without touching the
+    footprints (see prepare_fields). Every move is checked first; one bad move means nothing
+    is written."""
+    if not moves:
+        raise ValueError("pass at least one move")
+    plan, errors = prepare_fields(board, moves)
+    _refuse(errors)
+    _update(board, field_requests(plan), message)
+    return verify_fields(board, plan)
+
+
+def move_footprint_text(board, reference: str, text: str = "Reference", x: float | None = None,
+                        y: float | None = None, dx: float | None = None, dy: float | None = None,
+                        rotation: float | None = None, layer: str | None = None, visible: bool | None = None,
+                        size: float | None = None, thickness: float | None = None) -> dict:
+    """Move or restyle one field of a placed footprint (a batch of one)."""
+    move = {"reference": reference, "text": text, **{k: v for k, v in (
+        ("x", x), ("y", y), ("dx", dx), ("dy", dy), ("rotation", rotation), ("layer", layer),
+        ("visible", visible), ("size", size), ("thickness", thickness)) if v is not None}}
+    result = edit_footprint_texts(board, [move], f"Viaduct: move {reference} {text}")
+    item = result["items"][0]
+    return {"reference": reference, "before": item["before"], "after": item["after"],
+            "verified": item["verified"], "footprint_untouched": item["footprint_untouched"]}

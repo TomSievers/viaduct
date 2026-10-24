@@ -1,3 +1,4 @@
+import pytest
 from shapely.geometry import box
 
 from viaduct import connectivity, geometry, plan
@@ -101,3 +102,20 @@ def test_arc_points_follow_the_mid_point():
     pts = geometry.arc_points((1, 0), (0, 1), (-1, 0))
     assert all(y >= -1e-9 for _, y in pts)        # upper half circle through (0, 1)
     assert pts[0] == (1, 0) and abs(pts[-1][0] + 1) < 1e-9
+
+
+def test_plan_carries_field_and_graphic_moves():
+    p = plan.parse({"field_moves": [{"reference": "R1", "dx": 0, "dy": -1}],
+                    "graphic_moves": [{"id": "g1", "x": 10, "y": 20}]})
+    assert p.summary()["field_moves"] == 1 and p.summary()["graphic_moves"] == 1
+    assert p.field_moves[0]["reference"] == "R1" and plan.check(board(), p) == []
+
+
+def test_moves_must_be_lists_of_objects():
+    with pytest.raises(ValueError, match="field_moves"):
+        plan.parse({"field_moves": {"reference": "R1"}})
+
+
+def test_moving_an_item_the_plan_deletes_is_a_conflict():
+    p = plan.parse({"delete": ["t1"], "graphic_moves": [{"id": "t1", "dx": 1, "dy": 0}]})
+    assert [v["rule"] for v in plan.check(board(), p)] == ["move_deleted"]

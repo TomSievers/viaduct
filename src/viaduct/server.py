@@ -99,41 +99,47 @@ def net_islands(net: str = "GND") -> dict:
 @mcp.tool()
 def check_plan(plan: dict | None = None, plan_file: str | None = None, edge_clearance: float = 0.3,
                hole_to_hole: float = 0.25, assume_copper_layers: int | None = None) -> dict:
-    """Check a copper plan against the live board without changing it.
+    """Check a plan against the live board without changing it.
 
     The plan is JSON in mm: {"delete": [ids], "tracks": [{net, layer, start, end, width}],
     "vias": [{net, at, diameter, drill}], "zones": [{net, layer, outline, name, priority,
-    clearance, min_thickness}]}. Pass it inline or as a path to a JSON file.
-    assume_copper_layers checks a plan for a stackup that is about to be enabled.
+    clearance, min_thickness}], "field_moves": [entries as for move_footprint_texts],
+    "graphic_moves": [entries as for edit_board_graphics]}. Pass it inline or as a path to a
+    JSON file. Moves are applied in the same commit as the copper, and the returned board_token
+    also covers every text and graphic the plan moves. assume_copper_layers checks a plan for a
+    stackup that is about to be enabled.
     """
     p = _load_plan(plan, plan_file)
-    model = kicad_io.read_model(session.board())   # zones needed so zone deletes resolve
+    board = session.board()
+    model = kicad_io.read_model(board)   # zones needed so zone deletes resolve
     layers = None
     if assume_copper_layers:
         layers = ["F.Cu"] + [f"In{i}.Cu" for i in range(1, assume_copper_layers - 1)] + ["B.Cu"]
-    violations = planmod.check(model, p, edge_clearance, hole_to_hole, layers)
+    violations = planmod.check(model, p, edge_clearance, hole_to_hole, layers) + kicad_io.check_moves(board, p)
     return {"plan": p.summary(), "ok": not violations, "violations": violations[:100],
-            "violation_count": len(violations), "board_token": model.fingerprint()}
+            "violation_count": len(violations), "board_token": kicad_io.plan_token(board, model, p)}
 
 
 @mcp.tool()
 def apply_plan(plan: dict | None = None, plan_file: str | None = None, board_token: str | None = None,
                message: str = "Viaduct plan", refill_zones: bool = True,
                edge_clearance: float = 0.3, hole_to_hole: float = 0.25) -> dict:
-    """Apply a copper plan as one KiCad commit (one Ctrl+Z), after re-checking it.
+    """Apply a plan (copper, field and graphic moves) as one KiCad commit (one Ctrl+Z), after
+    re-checking it.
 
-    board_token is the value check_plan returned: if the board's copper changed since that
-    check (someone edited it meanwhile), nothing is written. Also refuses any plan with a
-    violation. Reads the board back afterwards and reports created items that are missing
-    or deleted items that are still present.
+    board_token is the value check_plan returned: if the board's copper, or a text or graphic
+    the plan moves, changed since that check (someone edited it meanwhile), nothing is written.
+    Also refuses any plan with a violation. Reads the board back afterwards and reports created
+    items that are missing, deleted items that are still present, and moves that did not land.
     """
     p = _load_plan(plan, plan_file)
     board = session.board()
     model = kicad_io.read_model(board)
-    if board_token is not None and board_token != model.fingerprint():
+    token_now = kicad_io.plan_token(board, model, p)
+    if board_token is not None and board_token != token_now:
         return {"applied": False, "reason": "the board changed since check_plan: re-plan and re-check",
-                "board_token_expected": board_token, "board_token_now": model.fingerprint()}
-    violations = planmod.check(model, p, edge_clearance, hole_to_hole)
+                "board_token_expected": board_token, "board_token_now": token_now}
+    violations = planmod.check(model, p, edge_clearance, hole_to_hole) + kicad_io.check_moves(board, p)
     if violations:
         return {"applied": False, "reason": "plan fails its check", "violation_count": len(violations),
                 "violations": violations[:50]}
@@ -141,9 +147,14 @@ def apply_plan(plan: dict | None = None, plan_file: str | None = None, board_tok
     if refill_zones:
         board.refill_zones()
     ok = (result["created"] == result["expected_created"] and not result["created_missing"]
-          and not result["deleted_still_present"])
+          and not result["deleted_still_present"] and result["field_moves"]["verified"]
+          and result["graphic_moves"]["verified"])
     if len(result["created_ids"]) > 200:
         del result["created_ids"]
+    for key in ("field_moves", "graphic_moves"):
+        if len(result[key]["items"]) > 50:
+            result[key]["items"] = result[key]["items"][:50]
+            result[key]["truncated"] = True
     out = {"applied": True, "verified": ok, "zones_refilled": refill_zones, **result}
     if board_token is None:
         out["warning"] = "applied without board_token: edits made since check_plan were not guarded against"
@@ -228,6 +239,93 @@ def set_board_origin(kind: str, x: float, y: float) -> dict:
     """Move the grid origin or the drill/place origin (kind: grid or drill) to x, y in mm.
     Returns both origins afterwards."""
     return kicad_io.set_origin(session.board(), kind, x, y)
+
+
+@mcp.tool()
+def list_footprint_texts(reference: str) -> dict:
+    """A placed footprint's fields (Reference, Value, user fields) and free texts such as the
+    ${REFERENCE} on F.Fab: id, layer, board position (mm), rotation, size, visibility."""
+    return kicad_io.footprint_texts(session.board(), reference)
+
+
+@mcp.tool()
+def move_footprint_text(reference: str, text: str = "Reference", x: float | None = None, y: float | None = None,
+                        dx: float | None = None, dy: float | None = None, rotation: float | None = None,
+                        layer: str | None = None, visible: bool | None = None, size: float | None = None,
+                        thickness: float | None = None) -> dict:
+    """Move a footprint's Reference, Value or other field without moving the footprint.
+
+    text is a field name (Reference, Value, ...) or a field id from list_footprint_texts. Free
+    texts inside a footprint (movable: false, e.g. ${REFERENCE} on F.Fab) are refused: KiCad's API
+    drops repeated edits of them. Give x and
+    y (board mm) or dx and dy. rotation is the angle list_footprint_texts reports; size is the
+    character height and width, thickness the stroke (mm). layer must be a non-copper layer, e.g.
+    F.Silkscreen <-> F.Fab. One KiCad commit (one Ctrl+Z); pads, tracks and the footprint itself
+    are left alone.
+    """
+    return kicad_io.move_footprint_text(session.board(), reference, text, x, y, dx, dy, rotation, layer, visible,
+                                        size, thickness)
+
+
+@mcp.tool()
+def move_footprint_texts(moves: list[dict], limit: int = 200) -> dict:
+    """Move or restyle many footprint fields at once, each its own way, in one KiCad commit
+    (one Ctrl+Z), without moving any footprint. For tidying the silkscreen of a whole board.
+
+    moves: [{"reference": "R1", "text": "Reference", "x": 10.0, "y": 20.0}, {"reference": "C3",
+    "dx": 0, "dy": -1.2, "rotation": 90}, {"reference": "U1", "text": "Value", "layer": "F.Fab",
+    "visible": false}, ...]. Keys as in move_footprint_text: text (field name or id, default
+    Reference), x/y or dx/dy (mm), rotation, layer (not copper), visible, size, thickness.
+    Every move is checked first: one bad move means nothing is written, and all problems are
+    listed. Returns verified/failed for all moves and up to `limit` item rows.
+    """
+    result = kicad_io.edit_footprint_texts(session.board(), moves)
+    return {**result, "items": result["items"][:limit], "truncated": len(result["items"]) > limit}
+
+
+@mcp.tool()
+def edit_board_graphics(moves: list[dict], include_locked: bool = False, limit: int = 200) -> dict:
+    """Move many free board items at once, each its own way, in one KiCad commit (one Ctrl+Z).
+
+    moves: [{"id": ..., "dx": 1.0, "dy": 0}, {"id": <text id>, "x": 120, "y": 80, "rotation": 90,
+    "size": 1.2}, {"id": ..., "dx": 0, "dy": 5, "layer": "F.Fab"}, ...]. dx/dy works for any item
+    (text, text box, shape, dimension); x/y, rotation and size are for texts. layer must not be
+    copper; items on copper are refused, locked ones unless include_locked. Every move is
+    checked first: one bad move means nothing is written. Returns verified/failed for all moves
+    and up to `limit` item rows.
+    """
+    result = kicad_io.edit_graphics(session.board(), moves, include_locked)
+    return {**result, "items": result["items"][:limit], "truncated": len(result["items"]) > limit}
+
+
+@mcp.tool()
+def list_board_graphics(layer: str | None = None, kind: str | None = None, bbox: list[float] | None = None,
+                        contains: str | None = None, limit: int = 200) -> dict:
+    """Free board text, text boxes, shapes and dimensions (fab notes, logos drawn as shapes, order
+    number placeholders, outlines) with ids and bounding boxes, for move_board_graphics.
+
+    kind: text, textbox, segment, arc, circle, rectangle, polygon, bezier or dimension.
+    bbox: [x1, y1, x2, y2] in mm. contains filters text by a substring.
+    """
+    rows = kicad_io.list_graphics(session.board(), layer, kind, bbox, contains)
+    return {"count": len(rows), "items": rows[:limit], "truncated": len(rows) > limit}
+
+
+@mcp.tool()
+def move_board_graphics(ids: list[str], dx: float, dy: float, layer: str | None = None,
+                        include_locked: bool = False) -> dict:
+    """Shift free board text, text boxes, shapes and dimensions by dx, dy (mm), optionally onto
+    another non-copper layer, in one KiCad commit (one Ctrl+Z). Items on copper are refused (they
+    are copper); locked items too, unless include_locked. Footprint text moves with move_footprint_text; footprints with Konnect."""
+    return kicad_io.move_graphics(session.board(), ids, dx, dy, layer, include_locked)
+
+
+@mcp.tool()
+def set_board_text(text_id: str, x: float | None = None, y: float | None = None, rotation: float | None = None,
+                   layer: str | None = None, size: float | None = None) -> dict:
+    """Place one free board text at an absolute position (mm) and rotation (degrees), optionally
+    on another non-copper layer or with another character size. One KiCad commit."""
+    return kicad_io.set_board_text(session.board(), text_id, x, y, rotation, layer, size)
 
 
 @mcp.tool()

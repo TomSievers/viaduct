@@ -27,6 +27,9 @@ What it does today:
 - **Board setup on the open board.** Netclass routing rules (clearance, track width, via and
   diff pair sizes) changed live, text variables, origins, more copper layers, zone
   properties, refill, save. Reading net classes and the stackup is left to Konnect.
+- **Moving text and graphics.** Footprint Reference/Value fields, free board text, text
+  boxes, shapes and dimensions (fab notes, order-number markers, logos), without moving
+  footprints or touching copper.
 - **Board setup the API cannot reach, in the files.** Stackup, layer names and types, solder
   mask and paste, via protection, violation severities, teardrop, length-tuning and graphics
   defaults, netclass removal, written into `.kicad_pcb` / `.kicad_pro` while KiCad has the
@@ -49,6 +52,7 @@ ships the capability:
 | Netclass edits on a board open in KiCad (`set_net_class`) | Konnect's `create_netclass` edits `.kicad_pro` and refuses while KiCad holds the project ([#791](https://github.com/mixelpixx/Konnect/issues/791), [#817](https://github.com/mixelpixx/Konnect/issues/817)); writing through `SetNetClasses` is named as a follow-up there but not filed. Diff pair fields: [#777](https://github.com/mixelpixx/Konnect/issues/777) |
 | Netclass removal, unsetting netclass fields (`edit_netclass_file`) | [#882](https://github.com/mixelpixx/Konnect/issues/882) |
 | Setting the physical stackup (`set_stackup`) | [#716](https://github.com/mixelpixx/Konnect/issues/716) |
+| Moving a footprint's Reference/Value text (`move_footprint_text`) | [#829](https://github.com/mixelpixx/Konnect/issues/829) |
 
 Removed because a Konnect release covers them: reading net classes and the physical stackup
 (`get_netclasses` and `get_board_stackup`, Konnect v0.13.0). Left to Konnect's file writers and
@@ -72,6 +76,13 @@ length-tuning and graphics defaults.
 | `set_net_class` | Creates a netclass or sets its clearance, track width, via, microvia and diff pair sizes |
 | `set_text_variables` | Adds, changes or removes project text variables |
 | `set_board_origin` | Moves the grid or drill/place origin |
+| `list_footprint_texts` | A footprint's fields and texts with ids, layer, position, rotation, size |
+| `move_footprint_text` | Moves or restyles a footprint's Reference, Value or other field, not the footprint |
+| `move_footprint_texts` | The same for many fields at once, each its own way, in one commit |
+| `list_board_graphics` | Free board text, text boxes, shapes and dimensions with ids and bounding boxes |
+| `move_board_graphics` | Shifts free board items by dx/dy, optionally onto another non-copper layer |
+| `edit_board_graphics` | Moves many free board items at once, each its own way (offset, or text position, rotation, size), in one commit |
+| `set_board_text` | Places one free board text at an absolute position, rotation and size |
 | `set_copper_layers` | Adds copper layers (never removes; needs `confirm`) |
 | `read_setup_files` | Board setup from the files: stackup, layers, mask and paste, severities, teardrops, defaults, netclasses |
 | `set_stackup` | Layer thickness, material, εr, loss tangent, color, finish, impedance control, edge connector and plating (file) |
@@ -93,7 +104,10 @@ need the project closed in KiCad; see [Board setup in the files](#board-setup-in
 `check_plan` returns a `board_token`, a fingerprint of every pad, track and via (zone fills
 excluded, since refills change them). Pass it to `apply_plan`: if anyone moved, added,
 deleted or re-netted copper since the check, nothing is written and the plan has to be
-re-checked. The commit itself is atomic, so there is never a half-applied plan to save.
+re-checked. A plan with field or graphic moves gets a token that also covers every text and
+graphic it moves, so a `dx`/`dy` never stacks on a move someone made in between; without
+moves the token is the plain copper fingerprint. The commit itself is atomic, so there is
+never a half-applied plan to save.
 
 ## Headless editing
 
@@ -138,6 +152,30 @@ The API cannot unset a netclass field, remove a class or assign nets to one: tho
 `edit_netclass_file` and Konnect's `assign_net_to_class`, which edit the project file while
 the project is closed in KiCad.
 
+## Moving text and graphics
+
+Silkscreen and fabrication markers are moved through KiCad's API, each call one commit (one
+Ctrl+Z), read back afterwards. For large boards, `move_footprint_texts` and
+`edit_board_graphics` take a list of moves, one per field or item, each with its own position:
+every move is checked before anything is sent, one bad move means nothing is written (all
+problems are listed), and the result reports which moves, if any, failed their readback. On
+KiCad's 309-footprint Tiny Tapeout demo, 169 References and 573 free graphics each moved in
+one call in about 0.2 s.
+
+- **Footprint fields** (`move_footprint_text`): the field is sent on its own with the
+  footprint as its container, so KiCad edits it in place. Sending the whole footprint back,
+  as footprint tools do, makes KiCad delete and re-create it, which loses its `(units ...)`
+  block on save ([Konnect #941](https://github.com/mixelpixx/Konnect/issues/941)); moving a field this way keeps it.
+- **Free texts inside a footprint** (e.g. `${REFERENCE}` on F.Fab) are refused: KiCad
+  10.0.7 drops repeated API edits of them (see [TODO.md](TODO.md)). Move the fields instead.
+- **Free board items** (`move_board_graphics`, `set_board_text`): text, text boxes, segments,
+  arcs, circles, rectangles, polygons, Béziers and dimensions. Items on copper are refused,
+  since moving copper here would skip the clearance checks; so is a copper target layer.
+  Locked items move only with `include_locked`.
+
+For a board KiCad does not have open, use `open_headless(copy=false)`, move, then
+`save_board`: the same API path, no direct file editing needed.
+
 ### Board setup in the files
 
 Most of Board Setup is not in KiCad's API (details in [TODO.md](TODO.md)). The (file) tools
@@ -172,13 +210,21 @@ its API.
   "vias":   [{"net": "GND", "at": [108.56, 113.2], "diameter": 0.6, "drill": 0.3}],
   "zones":  [{"net": "GND", "layer": "In1.Cu", "name": "GND_In1",
               "outline": [[100.3, 100.3], [159.7, 100.3], [159.7, 137.7], [100.3, 137.7]],
-              "priority": 0, "clearance": 0.2, "min_thickness": 0.2}]
+              "priority": 0, "clearance": 0.2, "min_thickness": 0.2}],
+  "field_moves":   [{"reference": "R5", "text": "Reference", "dx": 0, "dy": -1.2}],
+  "graphic_moves": [{"id": "<text, shape or dimension uuid>", "x": 120, "y": 80, "rotation": 90}]
 }
 ```
 
 Pass it inline (`plan`) or as a path (`plan_file`). Checks use each net's netclass
 clearance (the larger of the two nets), 0.25 mm hole-to-hole and 0.3 mm copper-to-edge
 by default. Zones are not obstacles: they refill around new copper.
+
+`field_moves` and `graphic_moves` take the entries of `move_footprint_texts` and
+`edit_board_graphics` and follow their rules (no copper, fields only, locked items refused).
+They land in the same commit as the copper, so moving a via and the label next to it is one
+Ctrl+Z, and a plan whose move fails its check writes nothing, copper included. A graphic move
+of an item the plan deletes is a `move_deleted` violation.
 
 ## Requirements
 
