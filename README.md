@@ -239,7 +239,7 @@ of an item the plan deletes is a `move_deleted` violation.
 
 ```sh
 nix build                     # result/bin/viaduct, runs the tests during the build
-claude mcp add --scope user -e VIADUCT_SOURCE=$PWD viaduct -- $PWD/result/bin/viaduct
+claude mcp add --scope user viaduct -e VIADUCT_SOURCE=$PWD -- $PWD/result/bin/viaduct
 ```
 
 The server finds KiCad's socket the same way `kicad-python` does; set
