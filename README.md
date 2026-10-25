@@ -99,38 +99,35 @@ need the project closed in KiCad.
 | `headless_status` | Whether a hidden editor is open, on which board |
 | `reload_server` | Rebuilds and loads the newest Viaduct code into the running server |
 
-## Requirements
-
-- KiCad 9.0.5 or newer with **Preferences → Plugins → Enable KiCad API** on, and the
-  board open in the PCB editor.
-- Nix, or Python 3.11+ with `kicad-python`, `shapely`, `numpy` and `mcp`.
-- For headless editing: `pcbnew` on PATH (or `VIADUCT_PCBNEW`) and `xvfb-run` (the Nix
-  package adds it; otherwise `VIADUCT_XVFB_RUN`).
-
 ## Install
 
+Linux and Windows, with pip or Nix: [docs/install.md](docs/install.md). In short, from a
+checkout:
+
 ```sh
-nix build                     # result/bin/viaduct, runs the tests during the build
-claude mcp add --scope user viaduct -e VIADUCT_SOURCE=$PWD -- $PWD/result/bin/viaduct
+python3 -m venv .venv && .venv/bin/pip install -e .
+claude mcp add --scope user viaduct -e VIADUCT_SOURCE=$PWD -- $PWD/.venv/bin/viaduct
 ```
 
-The server finds KiCad's socket the same way `kicad-python` does; set
-`KICAD_API_SOCKET` to override.
+KiCad 10 with **Preferences → Plugins → Enable KiCad API** on, and the board open in the PCB
+editor. The hidden editor is supported on Linux and experimental on Windows.
 
 ### Updating a running server
 
 `reload_server` picks up new code without restarting Claude:
-- It runs `nix build` in `VIADUCT_SOURCE`, tests included; a failed build reloads nothing.
+- With Nix, it runs `nix build` in `VIADUCT_SOURCE` first, tests included; a failed build
+  reloads nothing. A pip install has no build step.
 - It re-imports the tools from its `src` and tells the client the tool list changed.
 - `rebuild=false` skips the build and loads the working tree as it is.
 - An open hidden editor stays open.
 
-New dependencies, or a change to how the server starts (`main`), still need a restart.
+New dependencies (reinstall), or a change to how the server starts (`main`), still need a restart.
 
 ## Development
 
 ```sh
-nix develop -c sh -c 'PYTHONPATH=src python -m pytest'
+nix develop -c sh -c 'PYTHONPATH=src python -m pytest'   # with Nix
+.venv/bin/pip install pytest && .venv/bin/python -m pytest   # with a pip install
 ```
 
 `model`, `plan`, `connectivity`, `fanout` and `silk` are plain Python and shapely and are

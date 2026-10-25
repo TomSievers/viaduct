@@ -11,6 +11,7 @@ import atexit
 import importlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -531,11 +532,12 @@ def save_board() -> dict:
 
 @mcp.tool()
 def open_headless(board: str, copy: bool = True, timeout: float = 60.0) -> dict:
-    """Open a board in a hidden PCB editor (pcbnew on a virtual display); all tools then target it.
+    """Open a board in a hidden PCB editor; all tools then target it.
 
     copy=true (default) works on a private copy of the project, so the user's KiCad can stay open
     on the original. copy=false opens the file itself and is refused while KiCad has it open.
-    Needs pcbnew and xvfb-run.
+    Linux: pcbnew on a virtual display, needs pcbnew and xvfb-run. Windows (experimental): pcbnew
+    started with its windows hidden, found under Program Files or set with VIADUCT_PCBNEW.
     """
     started = headless.start(board, copy=copy, timeout=timeout)
     # the socket opens before the board has loaded; KiCad answers "not ready" until then
@@ -594,8 +596,11 @@ def _source(source: str | None) -> Path:
 
 
 def _revision(root: Path) -> str | None:
-    git = subprocess.run(["git", "-C", str(root), "describe", "--always", "--dirty"],
-                         capture_output=True, text=True)
+    try:
+        git = subprocess.run(["git", "-C", str(root), "describe", "--always", "--dirty"],
+                             capture_output=True, text=True)
+    except OSError:          # no git on PATH
+        return None
     return git.stdout.strip() or None
 
 
@@ -603,15 +608,16 @@ def _revision(root: Path) -> str | None:
 async def reload_server(ctx: Context, source: str | None = None, rebuild: bool = True) -> dict:
     """Load the newest Viaduct code into the running server, without restarting the client.
 
-    source is the Viaduct repository (default: VIADUCT_SOURCE). rebuild=true first runs
-    `nix build` there, which runs the tests and refreshes result/bin/viaduct for the next start;
-    a failed build reloads nothing. The tools are then re-imported from source/src and the client
-    is told the tool list changed. An open hidden editor stays open. New dependencies still need
-    a restart.
+    source is the Viaduct repository (default: VIADUCT_SOURCE). With Nix installed, rebuild=true
+    first runs `nix build` there, which runs the tests and refreshes result/bin/viaduct for the
+    next start; a failed build reloads nothing. Without Nix (a pip install) there is no build
+    step. The tools are then re-imported from source/src and the client is told the tool list
+    changed. An open hidden editor stays open. New dependencies still need an install and a
+    restart.
     """
     root = _source(source)
     built = None
-    if rebuild and (root / "flake.nix").exists():
+    if rebuild and (root / "flake.nix").exists() and shutil.which("nix"):
         nix = await anyio.run_process(["nix", "build"], cwd=root, check=False)
         if nix.returncode != 0:
             return {"reloaded": False, "reason": "nix build failed; the running version is unchanged",

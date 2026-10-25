@@ -560,7 +560,8 @@ def translate(msg, dx: int, dy: int) -> None:
     for f, v in msg.ListFields():
         if f.message_type is None or f.name == "size":
             continue
-        for sub in (v if f.is_repeated else [v]):
+        repeated = f.is_repeated if hasattr(f, "is_repeated") else f.label == f.LABEL_REPEATED  # protobuf < 6
+        for sub in (v if repeated else [v]):
             if f.message_type.full_name == "kiapi.common.types.Vector2":
                 sub.x_nm += dx
                 sub.y_nm += dy

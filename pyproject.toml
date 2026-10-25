@@ -13,7 +13,7 @@ dependencies = [
     "kicad-python>=0.5.0",
     "shapely>=2.0",
     "numpy",
-    "mcp>=1.2",
+    "mcp>=1.2,<2",   # mcp 2 renamed FastMCP
 ]
 
 [project.scripts]
