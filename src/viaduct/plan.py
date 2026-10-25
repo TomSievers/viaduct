@@ -16,7 +16,8 @@ field_moves and graphic_moves take the entries of move_footprint_texts and edit_
 They are checked against the live board by kicad_io (prepare_fields, prepare_graphics); here
 only conflicts inside the plan are checked.
 
-Tracks may also be written {"x1", "y1", "x2", "y2", "w"} and vias {"x", "y"}.
+Tracks may also be written {"x1", "y1", "x2", "y2", "w"} and vias {"x", "y"}. Tracks and vias
+take "locked": true to be created locked (an autorouter then leaves them alone).
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ class NewTrack:
     x2: float
     y2: float
     width: float
+    locked: bool = False
 
     @property
     def geom(self) -> BaseGeometry:
@@ -55,6 +57,7 @@ class NewVia:
     y: float
     diameter: float
     drill: float
+    locked: bool = False
 
     @property
     def geom(self) -> BaseGeometry:
@@ -103,11 +106,11 @@ def parse(data: dict, default_via=(0.6, 0.3), default_width=0.25) -> Plan:
         x1, y1 = _pt(t, "start", "x1", "y1")
         x2, y2 = _pt(t, "end", "x2", "y2")
         plan.tracks.append(NewTrack(t["net"], t["layer"], x1, y1, x2, y2,
-                                    float(t.get("width", t.get("w", default_width)))))
+                                    float(t.get("width", t.get("w", default_width))), bool(t.get("locked", False))))
     for v in data.get("vias", []):
         x, y = _pt(v, "at", "x", "y")
         plan.vias.append(NewVia(v["net"], x, y, float(v.get("diameter", default_via[0])),
-                                float(v.get("drill", default_via[1]))))
+                                float(v.get("drill", default_via[1])), bool(v.get("locked", False))))
     for z in data.get("zones", []):
         plan.zones.append(NewZone(z["net"], z["layer"], [tuple(map(float, p)) for p in z["outline"]],
                                   z.get("name", ""), int(z.get("priority", 0)),

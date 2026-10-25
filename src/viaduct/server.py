@@ -21,7 +21,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.stdio import stdio_server
 
-from viaduct import __version__, connectivity, kicad_io, plan as planmod, setup_files, silk
+from viaduct import __version__, connectivity, fanout, kicad_io, plan as planmod, setup_files, silk
 from viaduct.headless import Headless
 
 mcp = FastMCP("viaduct", instructions=(
@@ -101,6 +101,61 @@ def net_islands(net: str = "GND") -> dict:
     for g in groups:
         g["item_ids"] = g["item_ids"][:50]
     return {"net": net, "groups": len(groups), "islands": groups}
+
+
+@mcp.tool()
+def plan_fanout(planes: dict[str, str | list[str]] | None = None, references: list[str] | None = None,
+                fanout_distance: float = 1.5, share_distance: float = 1.0, pads_per_via: int = 4,
+                pad_gap: float = 0.1, via_in_pad: bool = False,
+                include_connected: bool = False, lock: bool = True, track_width: float | None = None,
+                via_diameter: float | None = None, via_drill: float | None = None,
+                edge_clearance: float = 0.3, hole_to_hole: float = 0.25, limit: int = 200) -> dict:
+    """Plan a via to its plane for every SMD pad of a plane net, before autorouting. Changes nothing.
+
+    planes maps nets to the inner layers of their plane, e.g. {"GND": "In1.Cu", "+3V3": "In2.Cu"};
+    by default every net with a filled zone on an inner layer. A pad first shares a connection
+    nearby: a track of at most share_distance to a via of its net on the plane, or to a pad
+    already joined to it (planned in this run too; one new via serves at most pads_per_via
+    pads; share_distance=0 never shares). Otherwise it gets a straight stub to a new through
+    via on the plane's fill, at most fanout_distance from the pad's centre: short stubs first,
+    inwards on ICs and connectors so signals keep the outside, away from the other pad on
+    passives. Tracks run at 0/45/90 degrees, at most one bend of 45.
+    Through-hole pads and pads already joined to their plane are skipped (include_connected
+    plans them anyway). Sizes come from each net's netclass unless given. The plan's tracks
+    and vias are locked (lock=false to leave them free), so Freerouting will not move them.
+
+    Returns rows per pad (placed or not, what it shares, and why not: spots=0 means no legal
+    via spot within fanout_distance), the plan, its check and board_token: pass both to
+    apply_plan, then refill_zones and net_islands per plane net to confirm every pad reaches
+    its plane.
+    """
+    board = session.board()
+    model = kicad_io.read_model(board)
+    if planes is not None:
+        planes = {n: [ls] if isinstance(ls, str) else list(ls) for n, ls in planes.items()}
+    rules = fanout.Rules(fanout_distance=fanout_distance, share_distance=share_distance,
+                         pads_per_via=pads_per_via, pad_gap=pad_gap, via_in_pad=via_in_pad,
+                         edge_clearance=edge_clearance, hole_to_hole=hole_to_hole)
+    nets = list(planes if planes is not None else fanout.plane_layers(model))
+    rules.nets = kicad_io.fanout_net_rules(board, nets, rules.default)
+    for r in rules.nets.values():
+        r.track_width = track_width or r.track_width
+        r.via_diameter = via_diameter or r.via_diameter
+        r.via_drill = via_drill or r.via_drill
+    out = fanout.fanout(model, rules, planes, references, include_connected, lock)
+    if out["errors"]:
+        return {"ok": False, "errors": out["errors"]}
+    p = planmod.parse(out["plan"])
+    violations = planmod.check(model, p, edge_clearance, hole_to_hole)
+    rows = out["rows"]
+    return {"planes": out["planes"],
+            "sizes": {n: vars(r) for n, r in rules.nets.items()},
+            "pads": len(rows), "placed": sum(r["placed"] for r in rows),
+            "shared": sum("shared" in r for r in rows), "new_vias": len(out["plan"]["vias"]),
+            "unplaced": [r["pad"] for r in rows if not r["placed"]],
+            "rows": rows[:limit], "truncated": len(rows) > limit,
+            "plan": out["plan"], "ok": not violations, "violations": violations[:50],
+            "board_token": kicad_io.plan_token(board, model, p)}
 
 
 @mcp.tool()

@@ -27,7 +27,7 @@ from shapely import affinity
 from shapely.geometry import LineString, Point, Polygon, box as shapely_box
 from shapely.ops import polygonize, unary_union
 
-from viaduct import geometry, silk
+from viaduct import fanout, geometry, silk
 from viaduct.model import BoardModel, Copper, Hole
 from viaduct.plan import Plan
 
@@ -261,11 +261,14 @@ def build_items(board, plan: Plan) -> list:
         tr.width = nm(t.width)
         tr.layer = layer_id(t.layer)
         tr.net = nets[t.net]
+        if t.locked:
+            tr._proto.locked = base.LockedState.LS_LOCKED
         out.append(tr)
     for v in plan.vias:
         via = Via()
         via.position = _vec(v.x, v.y)
         via.net = nets[v.net]
+        via.locked = v.locked
         ps = via._proto.pad_stack
         layer = ps.copper_layers.add()
         layer.layer = bt.BoardLayer.BL_F_Cu
@@ -1135,4 +1138,20 @@ def place_references(board, rules: silk.Rules, references: list[str] | None = No
     if apply and planned:
         result = edit_footprint_texts(board, planned, "Viaduct: place references")
         out.update(applied=True, verified=result["verified"], failed=result["failed"])
+    return out
+
+
+# ---------- plane fanout ----------
+
+def fanout_net_rules(board, nets: list[str], default: fanout.NetRule) -> dict[str, fanout.NetRule]:
+    """Track width and via size per net from its effective netclass, default where unset."""
+    by_name = {n.name: n for n in board.get_nets()}
+    found = [by_name[n] for n in nets if n in by_name]
+    classes = board.get_netclass_for_nets(found) if found else {}
+    out = {}
+    for n in nets:
+        nc = classes.get(n)
+        val = lambda attr, d: mm(getattr(nc, attr)) if nc is not None and getattr(nc, attr) else d
+        out[n] = fanout.NetRule(val("track_width", default.track_width), val("via_diameter", default.via_diameter),
+                                val("via_drill", default.via_drill))
     return out
