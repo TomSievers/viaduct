@@ -12,11 +12,11 @@ import hashlib
 import re
 
 from google.protobuf.empty_pb2 import Empty
+from google.protobuf.message import Message
 from kipy import KiCad
 from kipy.board_types import (ArcTrack, BoardArc, BoardBezier, BoardCircle, BoardPolygon, BoardRectangle,
                               BoardSegment, BoardText, BoardTextBox, Field, Track, Via, Zone)
 from kipy.geometry import PolygonWithHoles, PolyLine, PolyLineNode, Vector2
-from kipy.project import Project
 from kipy.project_types import TextVariables
 from kipy.util import pack_any
 from kipy.proto.board import board_commands_pb2 as bc, board_pb2, board_types_pb2 as bt
@@ -68,6 +68,10 @@ def is_copper(layer: int) -> bool:
 
 # ---------- connection ----------
 
+# kicad-python 0.8 speaks KiCad 10.0.6's API; older KiCad lacks commands Viaduct relies on
+MIN_KICAD = (10, 0, 6)
+
+
 class Session:
     """Lazily connected KiCad session; reconnects after KiCad restarts.
 
@@ -90,7 +94,12 @@ class Session:
             self._kicad, self._socket = None, socket
         try:
             if self._kicad is None:
-                self._kicad = KiCad(socket_path=socket, client_name="viaduct", timeout_ms=15000)
+                kicad = KiCad(socket_path=socket, client_name="viaduct", timeout_ms=15000)
+                v = kicad.get_version()
+                if (v.major, v.minor, v.patch) < MIN_KICAD:
+                    raise RuntimeError(f"Viaduct needs KiCad {'.'.join(map(str, MIN_KICAD))} or newer; "
+                                       f"this is KiCad {v.full_version}. Update KiCad")
+                self._kicad = kicad
             return self._kicad.get_board()
         except Exception as e:
             self._kicad = None
@@ -261,8 +270,7 @@ def build_items(board, plan: Plan) -> list:
         tr.width = nm(t.width)
         tr.layer = layer_id(t.layer)
         tr.net = nets[t.net]
-        if t.locked:
-            tr._proto.locked = base.LockedState.LS_LOCKED
+        tr.locked = t.locked
         out.append(tr)
     for v in plan.vias:
         via = Via()
@@ -497,20 +505,12 @@ def set_net_class(board, name: str, values: dict) -> dict:
                     "before check_plan relies on the new values"}
 
 
-def _project(board) -> Project:
-    # Board.get_project() hands over the board's own DocumentSpecifier and Project() retypes it
-    # in place, after which every board call fails with "document is not open"
-    doc = base.DocumentSpecifier()
-    doc.CopyFrom(board.document)
-    return Project(board.client, doc)
-
-
 def text_variables(board) -> dict:
-    return dict(_project(board).get_text_variables().variables)
+    return dict(board.get_project().get_text_variables().variables)
 
 
 def set_text_variables(board, values: dict, remove=()) -> dict:
-    project = _project(board)
+    project = board.get_project()
     if remove:
         merged = {k: v for k, v in project.get_text_variables().variables.items() if k not in remove}
         merged.update(values)
@@ -560,8 +560,7 @@ def translate(msg, dx: int, dy: int) -> None:
     for f, v in msg.ListFields():
         if f.message_type is None or f.name == "size":
             continue
-        repeated = f.is_repeated if hasattr(f, "is_repeated") else f.label == f.LABEL_REPEATED  # protobuf < 6
-        for sub in (v if repeated else [v]):
+        for sub in ([v] if isinstance(v, Message) else v):
             if f.message_type.full_name == "kiapi.common.types.Vector2":
                 sub.x_nm += dx
                 sub.y_nm += dy

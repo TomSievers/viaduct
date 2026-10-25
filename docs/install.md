@@ -7,16 +7,19 @@ KiCad. The hidden editor (`open_headless`) is the one part that differs per plat
 
 ## What you need
 
-- **KiCad 10** (tested with 10.0.7), with the API switched on: **Preferences → Preferences →
-  Plugins → Enable KiCad API** (restart KiCad if Viaduct can't connect afterwards). The file
-  tools only edit KiCad 10 files; KiCad 9.0.5 or newer may work for the live tools but is
-  untested.
-- **Python 3.11 or newer** (tested with 3.12 and 3.14).
+- **The latest KiCad 10 release**, at least 10.0.6 (tested with 10.0.7), with the API
+  switched on: **Preferences → Preferences → Plugins → Enable KiCad API** (restart KiCad if
+  Viaduct can't connect afterwards). An older KiCad is refused with its version.
+- **Python 3.14 or newer.**
 - **Claude Code**, for the `claude mcp add` step.
 - **git**, to get the code and to update it.
 
 Install from a git checkout, as an editable install (`-e`): `reload_server` then loads new
 code straight from that checkout, without reinstalling.
+
+Viaduct is a bleeding-edge tool: it requires the newest releases of its dependencies
+(kicad-python, mcp, shapely, numpy) and raises its minimums as new ones come out. Run
+`pip install -e . --upgrade` after a `git pull` that changed `pyproject.toml`.
 
 ## Linux
 
@@ -43,7 +46,7 @@ The Nix package brings `xvfb-run` along. `reload_server` rebuilds with `nix buil
 
 ## Windows
 
-In PowerShell, with Python from python.org or `winget install Python.Python.3.12`:
+In PowerShell, with Python 3.14 from python.org or `winget install Python.Python.3.14`:
 
 ```powershell
 git clone https://github.com/TomSievers/viaduct.git $HOME\viaduct
@@ -70,7 +73,7 @@ git pull
 
 Then ask Claude to run `reload_server`: the tools are reloaded from the checkout and appear
 in the running session, no restart needed. After a change to the dependencies in
-`pyproject.toml`, run `pip install -e .` again and restart Claude Code.
+`pyproject.toml`, run `pip install -e . --upgrade` and restart Claude Code.
 
 ## The hidden editor per platform
 

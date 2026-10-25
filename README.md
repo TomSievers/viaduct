@@ -109,8 +109,8 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 claude mcp add --scope user viaduct -e VIADUCT_SOURCE=$PWD -- $PWD/.venv/bin/viaduct
 ```
 
-KiCad 10 with **Preferences → Plugins → Enable KiCad API** on, and the board open in the PCB
-editor. The hidden editor is supported on Linux and experimental on Windows.
+KiCad 10.0.6 or newer with **Preferences → Plugins → Enable KiCad API** on, and the board open
+in the PCB editor. Python 3.14 or newer. The hidden editor is supported on Linux and experimental on Windows.
 
 ### Updating a running server
 
@@ -129,6 +129,12 @@ New dependencies (reinstall), or a change to how the server starts (`main`), sti
 nix develop -c sh -c 'PYTHONPATH=src python -m pytest'   # with Nix
 .venv/bin/pip install pytest && .venv/bin/python -m pytest   # with a pip install
 ```
+
+Viaduct tracks the newest releases and drops support for older ones; there are no
+compatibility code paths. The flake follows `nixpkgs-unstable`, and builds the pure-Python
+dependencies where nixpkgs lags behind PyPI itself (the `newer` table in `flake.nix`).
+`nix flake check` builds and tests against the lock; to move on, run `nix flake update`,
+bump `newer` and the floors in `pyproject.toml`, and run the check again.
 
 `model`, `plan`, `connectivity`, `fanout` and `silk` are plain Python and shapely and are
 tested without KiCad. `kicad_io` is the only module that talks to KiCad.

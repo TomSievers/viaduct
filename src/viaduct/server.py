@@ -18,14 +18,14 @@ import time
 from pathlib import Path
 
 import anyio
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.stdio import stdio_server
 
 from viaduct import __version__, connectivity, fanout, kicad_io, plan as planmod, setup_files, silk
 from viaduct.headless import Headless
 
-mcp = FastMCP("viaduct", instructions=(
+mcp = MCPServer("viaduct", instructions=(
     "Viaduct is experimental and works next to Konnect: it holds features Konnect treats as out of "
     "scope and features still being tried out. Tools may change or disappear between versions; a "
     "tool is removed once Konnect releases the same capability, so prefer Konnect where both exist. "
@@ -579,9 +579,9 @@ def headless_status() -> dict:
     return headless.status()
 
 
-# The FastMCP instance serving stdio. After reload_server the tools come from a newer copy of
+# The MCPServer instance serving stdio. After reload_server the tools come from a newer copy of
 # this module, whose own `mcp` never runs: each copy hands the live one on.
-_live: FastMCP | None = None
+_live: MCPServer | None = None
 
 
 def _source(source: str | None) -> Path:
@@ -650,7 +650,7 @@ async def reload_server(ctx: Context, source: str | None = None, rebuild: bool =
 
 
 async def _serve():
-    server = mcp._mcp_server
+    server = mcp._lowlevel_server
     async with stdio_server() as (read, write):
         # tools_changed lets reload_server tell the client to fetch the new tool list
         await server.run(read, write, server.create_initialization_options(NotificationOptions(tools_changed=True)))

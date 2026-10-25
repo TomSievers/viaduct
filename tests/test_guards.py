@@ -95,3 +95,19 @@ def test_missing_xvfb_is_explained(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="xvfb"):
         h.start(str(board))
     assert h.root is None          # the private dir is cleaned up again
+
+
+def test_an_older_kicad_is_refused_with_its_version(monkeypatch):
+    from kipy.kicad import KiCadVersion
+    from viaduct import kicad_io
+
+    class OldKiCad:
+        def __init__(self, **_):
+            pass
+
+        def get_version(self):
+            return KiCadVersion(10, 0, 5, "10.0.5")
+
+    monkeypatch.setattr(kicad_io, "KiCad", OldKiCad)
+    with pytest.raises(RuntimeError, match=r"needs KiCad 10\.0\.6 or newer; this is KiCad 10\.0\.5"):
+        kicad_io.Session(lambda: None).board()
