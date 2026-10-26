@@ -1,0 +1,85 @@
+# Viaduct project config. Copy it next to the root schematic as viaduct.toml and keep only
+# what you change: every value here is the default.
+
+[readability]
+ignore_sheets = []                  # globs relative to the root schematic
+
+# Which parts count as passive: pin_exit leaves them to passive_pin_exit. A part is passive
+# when its reference prefix (the letters before the number) is in references, or its library
+# symbol matches a glob in lib_ids, and it has at most max_pins visible pins.
+[readability.passives]
+references = ["R", "C", "L", "FB", "F", "RT", "RV", "Y"]   # resistors, capacitors, inductors,
+                                    # ferrite beads, fuses, thermistors, varistors, crystals
+lib_ids = []                        # e.g. ["Device:R*", "MyLib:Shunt*"]
+max_pins = 2
+
+[readability.rules.wire_through_text]
+severity = "error"
+clearance = 0.2                     # mm of room a wire keeps from text
+
+[readability.rules.wire_through_symbol]
+severity = "error"
+power_symbols = false               # also check wires over power symbol bodies
+
+[readability.rules.wire_over_pin]
+severity = "error"
+
+[readability.rules.wire_overlap]
+severity = "error"
+
+[readability.rules.wire_crossing]
+severity = "warning"
+buses = false                       # also report crossing buses
+
+[readability.rules.missing_junction]
+severity = "error"
+
+[readability.rules.four_way_junction]
+severity = "warning"
+
+[readability.rules.pin_exit]
+severity = "warning"
+min_stub = 1.27                     # mm straight out of a pin before the first turn
+sheet_pins = true                   # also check hierarchical sheet pins
+
+[readability.rules.passive_pin_exit]    # pin_exit for two-pin C, R and L parts
+severity = "ignore"                 # set to "warning" to turn it on
+min_stub = 1.27
+
+[readability.rules.text_overlap]
+severity = "error"
+clearance = 0.0                     # mm of room between two texts, or text and a body
+
+[readability.rules.symbol_overlap]
+severity = "error"
+
+[readability.rules.small_text]
+severity = "warning"
+min_size = 1.0                      # mm character height
+
+[readability.rules.diagonal_wire]
+severity = "warning"
+buses = true
+
+[readability.rules.off_grid]
+severity = "warning"
+grid = 1.27                         # mm
+
+[readability.rules.power_orientation]
+severity = "warning"
+down_pattern = "(?i)^(.*gnd.*|vss.*|vee.*|-.*|earth|0)$"   # nets drawn pointing down
+
+[readability.rules.long_wire]
+severity = "ignore"                 # set to "warning" to turn it on
+max_length = 76.2                   # mm
+
+[readability.rules.wire_bends]
+severity = "warning"
+max_bends = 3
+
+# Accept a finding (or a group of them). rule is required; sheet and item narrow it.
+# [[readability.suppress]]
+# rule = "text_overlap"
+# sheet = "power.kicad_sch"
+# item = "R12"
+# reason = "value inside the divider on purpose"

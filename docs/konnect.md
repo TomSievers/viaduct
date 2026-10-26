@@ -44,6 +44,11 @@ that own the layout decisions therefore stay in Viaduct:
 Text variables, origins, layer names, solder mask and paste, via protection, violation
 severities, and teardrop, length-tuning and graphics defaults.
 
+Schematic readability (`check_readability`) is tried out here: it only reads the schematic
+files and edits nothing, so it stays clear of Konnect's schematic tools. Konnect's issues
+were not yet searched for a counterpart; if it fits Konnect, it moves there once the rules
+have proven useful.
+
 ## Left to Konnect
 
 - **Removed because a Konnect release covers them:** reading net classes and the physical

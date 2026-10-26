@@ -22,7 +22,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.stdio import stdio_server
 
-from viaduct import __version__, connectivity, fanout, kicad_io, plan as planmod, setup_files, silk
+from viaduct import __version__, connectivity, fanout, kicad_io, plan as planmod, readability, setup_files, silk
 from viaduct.headless import Headless
 
 mcp = MCPServer("viaduct", instructions=(
@@ -432,6 +432,51 @@ def read_setup_files(board: str) -> dict:
     Also reports whether KiCad has the project open: the set_* file tools refuse while it does.
     """
     return setup_files.read(board)
+
+
+@mcp.tool()
+def check_readability(schematic: str, rules: list[str] | None = None, sheets: list[str] | None = None,
+                      config: str | None = None, include_suppressed: bool = False, limit: int = 200) -> dict:
+    """Check how readable a schematic is, sheet by sheet, against layout rules. Changes nothing.
+
+    schematic is the root .kicad_sch (or the .kicad_pro); every sheet below it is checked once.
+    The files are read from disk, so save in KiCad first. Rules include wires through text or
+    symbols, wires over pins, crossings, missing and four-way junctions, wires leaving a pin
+    sideways or more than one per pin, overlapping text and symbols, small text, off-grid
+    points, power symbol direction, long wires and bends; list_readability_rules describes
+    them. rules and sheets (file names relative to the root) limit the run. Severities,
+    options, skipped sheets and accepted findings come from config (default: viaduct.toml
+    next to the root schematic, [readability] table). Each finding has its rule, severity,
+    sheet, position (mm), the items involved and a suggested fix.
+    """
+    result = readability.check(schematic, rules, sheets, config, include_suppressed)
+    result["truncated"] = len(result["findings"]) > limit
+    result["findings"] = result["findings"][:limit]
+    return result
+
+
+@mcp.tool()
+def plan_field_positions(schematic: str, sheets: list[str] | None = None, config: str | None = None,
+                         margin: float = 0.25, radius: float = 20.0) -> dict:
+    """Plan new positions for the symbol fields (Reference, Value, ...) that check_readability
+    reports under wire_through_text or text_overlap. Changes nothing.
+
+    For each flagged field it picks the nearest grid position, in either orientation, that is
+    margin (mm) clear of every wire, drawn line, sheet box and other text and stays nearer its
+    own symbol than any other, searching up to radius mm from the symbol. Each sheet's edits
+    have the shape of Konnect's edit_schematic_component (reference, unit, field_placements
+    with absolute x, y and stored rotation), one entry per symbol unit. Fields no position fits
+    are listed under unplaced with their length: those need the parts spaced out, or the text
+    shortened or hidden.
+    """
+    return readability.plan_fields(schematic, sheets, config, margin, radius)
+
+
+@mcp.tool()
+def list_readability_rules(schematic: str | None = None, config: str | None = None) -> dict:
+    """Every check_readability rule: id, description, default severity and options, and the
+    severity and options the config sets (the config next to schematic, or the file config)."""
+    return readability.describe(schematic, config)
 
 
 @mcp.tool()
