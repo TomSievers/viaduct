@@ -138,3 +138,16 @@ bump `newer` and the floors in `pyproject.toml`, and run the check again.
 
 `model`, `plan`, `connectivity`, `fanout` and `silk` are plain Python and shapely and are
 tested without KiCad. `kicad_io` is the only module that talks to KiCad.
+
+## AI disclosure
+
+Viaduct is written with AI assistance: most of the code, tests and docs are drafted with
+Claude Code, and directed, reviewed and tested by the maintainer. Commits made this way carry
+a `Co-Authored-By: Claude` trailer.
+
+Viaduct edits real boards. Run DRC after its changes and keep the project under version
+control or backed up, whichever editor made the change.
+
+## License
+
+[MIT](LICENSE)
