@@ -456,20 +456,74 @@ def check_readability(schematic: str, rules: list[str] | None = None, sheets: li
 
 
 @mcp.tool()
-def plan_field_positions(schematic: str, sheets: list[str] | None = None, config: str | None = None,
-                         margin: float = 0.25, radius: float = 20.0) -> dict:
-    """Plan new positions for the symbol fields (Reference, Value, ...) that check_readability
-    reports under wire_through_text or text_overlap. Changes nothing.
+def plan_readability_fixes(schematic: str, sheets: list[str] | None = None, config: str | None = None,
+                           rules: list[str] | None = None) -> dict:
+    """Plan Konnect edits that solve check_readability's errors, sheet by sheet. Changes nothing.
 
-    For each flagged field it picks the nearest grid position, in either orientation, that is
-    margin (mm) clear of every wire, drawn line, sheet box and other text and stays nearer its
-    own symbol than any other, searching up to radius mm from the symbol. Each sheet's edits
-    have the shape of Konnect's edit_schematic_component (reference, unit, field_placements
-    with absolute x, y and stored rotation), one entry per symbol unit. Fields no position fits
-    are listed under unplaced with their length: those need the parts spaced out, or the text
-    shortened or hidden.
+    Solvers, applied in order to an in-memory copy so each sees the ones before it:
+    wire_overlap (overlapping wires merged into one run), wire_through_symbol,
+    wire_through_text on labels and free text, and wire_over_pin where a wire crosses a pin
+    (the wire path routed again between its connection points), missing_junction (dots
+    added), and text_overlap / wire_through_text on symbol fields (the text moved). A pin on
+    a wire's middle and overlapping symbols are listed under unresolved with options, as are
+    fields or wires no clear position or route fits. rules limits the solvers (default:
+    every one whose rule the config does not ignore).
+
+    Each sheet's steps are Konnect calls with their arguments, in the order to apply them:
+    batch_add_wire, batch_delete_schematic_wire, batch_add_junction, then
+    edit_schematic_component per symbol. errors_remaining is what the error rules would still
+    find after the steps; run check_readability afterwards to confirm.
     """
-    return readability.plan_fields(schematic, sheets, config, margin, radius)
+    return readability.plan_fixes(schematic, sheets, config, rules)
+
+
+@mcp.tool()
+def query_schematic_region(schematic: str, bounds: list[float], kinds: list[str] | None = None,
+                           distance: float = 0.0, limit: int = 200) -> dict:
+    """What lies in a rectangle of one sheet, or within distance (mm) of it. Changes nothing.
+
+    schematic is the sheet's .kicad_sch; bounds is [x1, y1, x2, y2] in mm. kinds filters to
+    wire, line (a symbol's drawing, pins included), body (a symbol's bounding box), text,
+    sheet (a hierarchical sheet box), pin and point (junctions, no-connects, label anchors).
+    Each item has its kind, id (wire uuid, reference, "R1 Value", "R1 pin 2", ...), owner and
+    bounds.
+    """
+    return readability.query_region(schematic, bounds, kinds, distance, limit)
+
+
+@mcp.tool()
+def find_clear_position(schematic: str, near: list[float], size: list[float] | None = None,
+                        reference: str | None = None, field: str | None = None, radius: float = 20.0,
+                        step: float = 1.27, clearance: float = 0.25, kinds: list[str] | None = None,
+                        exclude: list[str] | None = None, limit: int = 5) -> dict:
+    """The nearest positions to near ([x, y] mm) on one sheet where something fits clear of
+    everything else, cheapest first. Changes nothing; takes milliseconds.
+
+    What to place: size [w, h] for a box centred on the position; reference and field for a
+    symbol's field text (positions are its anchor, in both orientations, with the stored
+    rotation to pass to Konnect); reference alone for a whole symbol with its text (positions
+    are its origin, for move_schematic_component). Every candidate is clearance mm clear of the
+    given kinds (default: wire, line, body, text, sheet, pin; a field may sit inside a body)
+    within radius mm of near, on a step mm grid. exclude takes item ids to ignore.
+    """
+    return readability.find_position(schematic, near, size, reference, field, radius, step, clearance, kinds,
+                                     exclude, limit)
+
+
+@mcp.tool()
+def route_schematic_wire(schematic: str, start: list[float], end: list[float], clearance: float = 0.25,
+                         margin: float = 15.0, exclude: list[str] | None = None) -> dict:
+    """An orthogonal wire path between two points on one sheet, as wires for Konnect's
+    batch_add_wire. Changes nothing.
+
+    The path runs on the 1.27 mm grid within margin mm of the two points, keeps clearance from
+    symbol bodies, text and sheet boxes, touches no pin but the ones it connects, never runs
+    along another wire and never meets another wire's end, a junction or a label (which would
+    connect it). It may cross wires, never turning on one, and leaves and enters a pin straight
+    outward. It prefers few bends and crossings. exclude takes item ids to ignore, such as the
+    uuids of wires the path replaces.
+    """
+    return readability.route_wire(schematic, start, end, clearance, margin, exclude)
 
 
 @mcp.tool()

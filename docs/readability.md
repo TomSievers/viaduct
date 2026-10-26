@@ -39,19 +39,50 @@ Each rule is a module in `src/viaduct/readability/rules/`; `RULES` in that packa
 `severity` and `options` (each option with its default, which also fixes its type), and
 yields `Finding`s from `check(sheet, options)`.
 
-## Fixing text findings
+## Fixing findings
 
-Most `wire_through_text` and `text_overlap` findings are a symbol's Reference or Value
-sitting in the wrong place. `plan_field_positions` plans where each flagged field should go:
-the nearest grid position, in either orientation, that is `margin` (0.25 mm) clear of every
-wire, drawn line, sheet box and other text, within `radius` (20 mm) of its symbol, and nearer
-that symbol than any other so it still reads as its text. Fields planned earlier count as
-obstacles for later ones. Nothing is changed: each sheet's `edits` are shaped like Konnect's
-`edit_schematic_component` (`reference`, `unit`, `field_placements`), one call per entry.
+`plan_readability_fixes` turns the error findings into Konnect calls, sheet by sheet. The
+solvers run in order on an in-memory copy of the sheet, each seeing what the ones before it
+changed:
 
-A field no position fits is listed under `unplaced` with its length. That means the parts
-are too close for their text, such as 100nF capacitors 5.08 mm apart, so the fix is to space
-them out, or to shorten or hide the field; moving the text cannot solve it.
+| Order | Finding | Solver |
+|---|---|---|
+| 1 | `wire_overlap` | The overlapping wires become one run, split where the old ones ended |
+| 2 | `wire_through_text`, `text_overlap` on a net label | The label turns to the nearest clear orientation; its connection point stays put |
+| 3 | `wire_through_symbol`, `wire_through_text` on another net's wire, `wire_over_pin` | The wire path is routed again between its two connection points, leaving pins straight outward; a path with a loose end connects nothing there and is removed |
+| 4 | `missing_junction` | A dot wherever three or more wires meet afterwards |
+| 5 | `text_overlap`, `wire_through_text` on a symbol field | The field moves to the nearest clear spot, in either orientation, that still reads as its symbol's |
+
+Each sheet's `steps` are Konnect calls with their arguments, in the order to apply them:
+`batch_add_wire`, `batch_delete_schematic_wire` (it prunes the dots deleted wires leave
+unjustified, judged with the new wires already in place), `batch_add_junction`,
+`batch_rotate_labels`, then `edit_schematic_component` per symbol. `errors_remaining` is what
+the error rules would still find once they are applied; run `check_readability` afterwards to
+confirm. No step changes a net: the plans were checked against KiCad's netlist before and
+after.
+
+Listed under `unresolved`, with a reason and often a suggestion, instead of solved:
+- a pin on a wire's middle: a junction connects it, or the wire is routed away, and only the
+  designer knows which is meant;
+- `symbol_overlap`: a clear spot for one symbol is suggested, but moving it leaves its wires;
+- free text over a wire or text: a clear spot is suggested, but Konnect cannot move text;
+- two labels with the same name on the same point: `batch_rotate_labels` cannot tell them apart;
+- a field, label or wire with no clear position or route nearby: the parts need more room
+  (a field's length is given), or the text shortened, or the wire replaced by net labels.
+
+### Search tools
+
+The solvers are thin layers over one indexed view of a sheet (`space.py`), and the same view
+is exposed for working out fixes the solvers leave, without testing every item by hand:
+
+- `query_schematic_region`: everything in or near a rectangle, by kind (wire, line, body,
+  text, sheet, pin, point), with ids to pass on.
+- `find_clear_position`: the nearest positions where a box, a symbol's field or a whole
+  symbol fits clearance clear of the chosen kinds. Candidates are tried nearest first and the
+  search stops at the first that cannot be beaten, so it takes milliseconds.
+- `route_schematic_wire`: an orthogonal path on the 1.27 mm grid between two points that keeps
+  clear of bodies, text and pins, never runs along or ends on another wire, may cross wires
+  but never turns on one, and leaves and enters pins straight outward.
 
 ## Config
 

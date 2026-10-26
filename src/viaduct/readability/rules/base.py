@@ -113,3 +113,29 @@ def tees(wires: list[Wire]) -> set[tuple[int, int]]:
             if any(passes_through(wires[i], e) for i in tree.query(Point(e).buffer(TOL), predicate="intersects")):
                 out.add(key(e))
     return out
+
+
+def stops(sheet: Sheet, wires: list[Wire]) -> set[tuple[int, int]]:
+    """Points where a wire path ends: pin tips, labels, junctions, no-connects, branches,
+    loose ends and wire ends on another wire's middle."""
+    ends = wire_ends(wires)
+    out = {key(p.tip) for p in sheet.pins} | {key(t.at) for t in sheet.labels}
+    out |= {key(p) for p in sheet.junctions + sheet.no_connects}
+    out |= {k for k, v in ends.items() if len(v) != 2}
+    return out | tees(wires)
+
+
+def chain(ends, stop_keys, start: Wire) -> tuple[list[Wire], Pt, Pt]:
+    """The wires of the path through start between two stops, in order, and its two ends."""
+    def extend(w, at):
+        out = []
+        while key(at) not in stop_keys:
+            nxt = [(v, far) for v, far in ends[key(at)] if v is not w]
+            if len(nxt) != 1 or nxt[0][0] is start:
+                break
+            w, at = nxt[0]
+            out.append(w)
+        return out, at
+    back, a = extend(start, start.a)
+    fwd, b = extend(start, start.b)
+    return back[::-1] + [start] + fwd, a, b

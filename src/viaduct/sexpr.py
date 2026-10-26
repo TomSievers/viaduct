@@ -54,14 +54,19 @@ def parse(text: str) -> Node:
             stack[-1].items.append(m.group(3) or m.group(4))
 
 
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r"}
+
+
 def unquote(atom: str) -> str:
+    """A quoted atom's text; KiCad writes a newline in text as \\n."""
     if len(atom) >= 2 and atom[0] == atom[-1] == '"':
-        return re.sub(r"\\(.)", r"\1", atom[1:-1])
+        return re.sub(r"\\(.)", lambda m: _ESCAPES.get(m.group(1), m.group(1)), atom[1:-1])
     return atom
 
 
 def quote(s: str) -> str:
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    s = s.replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + s.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r") + '"'
 
 
 def num(v: float) -> str:

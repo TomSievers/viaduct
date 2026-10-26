@@ -274,16 +274,30 @@ def _place(frame: tuple[float, float, float, float], at: Pt, angle: float) -> Po
 def _label(n: Node) -> Text:
     text = sexpr.unquote(n.items[1])
     at = n.first("at")
-    h, w = _font(n)
-    x0, y0, x1, y1 = text_frame(text, h, w, _justify(n))
-    if n.name == "label":
+    font, justify, angle = _font(n), _justify(n), _angle(at)
+    return Text(n.name, text, _xy(at), label_box(n.name, text, _xy(at), angle, font, justify), font[0],
+                uuid=_uuid(n), font=font, justify=justify, angle=angle)
+
+
+def label_justify(kind: str, angle: float) -> tuple[str, str]:
+    """The justification KiCad gives a label turned to angle: the text runs away from the
+    connection point, local labels above their wire, the others centred on it."""
+    h = "right" if round(angle) % 360 in (180, 270) else "left"
+    return h, "bottom" if kind in ("label", "text") else "center"
+
+
+def label_box(kind: str, text: str, at: Pt, angle: float, font: Pt, justify: tuple[str, str] | None = None) -> Polygon:
+    """Where a label or free text draws at angle; justify defaults to label_justify's."""
+    h, w = font
+    x0, y0, x1, y1 = text_frame(text, h, w, justify or label_justify(kind, angle))
+    if kind == "label":
         y0, y1 = y0 - LABEL_OFFSET * h, y1 - LABEL_OFFSET * h
-    elif n.name != "text":
+    elif kind != "text":
         # global and hierarchical labels draw a shape: text after an arrow, centred on the wire
         reach = (x1 - x0) + 1.5 * h
         x0, x1 = (0.0, reach) if x0 >= 0 else (-reach, 0.0)
         y0, y1 = -0.75 * h, 0.75 * h
-    return Text(n.name, text, _xy(at), _place((x0, y0, x1, y1), _xy(at), _angle(at)), h, uuid=_uuid(n))
+    return _place((x0, y0, x1, y1), at, angle)
 
 
 def _text_box(n: Node) -> Text:

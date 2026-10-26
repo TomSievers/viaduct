@@ -99,7 +99,10 @@ need the project closed in KiCad.
 |---|---|
 | `check_readability` | Checks every sheet against layout rules (wires through text or symbols, crossings, pin exits, overlaps, ...); changes nothing |
 | `list_readability_rules` | Each rule with its description, options and the severity the config gives it |
-| `plan_field_positions` | Clear positions for the Reference/Value text the text rules flag, as Konnect edits; changes nothing |
+| `plan_readability_fixes` | Konnect calls that solve the error findings: wires merged or rerouted, dots added, labels turned, fields moved |
+| `query_schematic_region` | What lies in or near a rectangle of a sheet: wires, drawings, bodies, text, pins, junctions |
+| `find_clear_position` | Nearest spots where a box, a field or a whole symbol fits clear of everything, in milliseconds |
+| `route_schematic_wire` | An orthogonal wire path between two points that avoids parts, text and pins and meets no other wire |
 
 **Editor and server**: [headless editing](docs/headless.md)
 

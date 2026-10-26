@@ -1,6 +1,7 @@
 import pytest
+from shapely.geometry import LineString, box
 
-from viaduct.readability import ConfigError, check, config as cfgmod, plan_fields, sheet as sh
+from viaduct.readability import ConfigError, check, config as cfgmod, plan_fixes, sheet as sh
 from viaduct.readability.rules import BY_ID
 
 LIB = """\t(lib_symbols
@@ -340,11 +341,97 @@ def test_plan_reports_fields_that_fit_nowhere(tmp_path):
     assert unplaced[0]["length_mm"] > 0 and "more room" in unplaced[0]["reason"]
 
 
-def test_plan_fields_gives_konnect_edits(tmp_path):
+def test_plan_fixes_gives_konnect_steps(tmp_path):
     root = sheet_file(tmp_path, resistor("R1", 100, 100), wire(103.5, 90, 103.5, 110))
-    r = plan_fields(root)
+    r = plan_fixes(root, rules=["text_overlap", "wire_through_text"])
     (sheet,) = r["sheets"]
-    (edit,) = sheet["edits"]
-    assert edit["reference"] == "R1" and edit["unit"] == 1
-    assert set(edit["field_placements"]["Reference"]) == {"x", "y", "rotation"}
-    assert r["fields_moved"] == 1 and r["fields_unplaced"] == 0
+    (step,) = sheet["steps"]
+    assert step["konnect"] == "edit_schematic_component"
+    assert step["args"]["reference"] == "R1" and step["args"]["unit"] == 1
+    assert set(step["args"]["field_placements"]["Reference"]) == {"x", "y", "rotation"}
+    assert sheet["errors_remaining"] == {} and r["unresolved"] == 0
+
+
+# ---------- search, routing and solvers ----------
+
+def _labels(*names_at):
+    return "".join(label(n, x, y) for n, x, y in names_at)
+
+
+def test_unquote_reads_kicad_newlines():
+    from viaduct import sexpr
+    assert sexpr.unquote('"two\\nlines"') == "two\nlines"
+    for s in ("a\nb", 'q"x', "back\\slash", "tab\tx"):
+        assert sexpr.unquote(sexpr.quote(s)) == s
+
+
+def test_route_goes_around_a_body_and_leaves_pins_outward(tmp_path):
+    from viaduct.readability.space import Space
+    s = sh.read(sheet_file(tmp_path, resistor("R1", 100, 100), wire(90.17, 100.33, 110.49, 100.33, "w1")))
+    sp = Space(s)
+    path = sp.route((90.17, 100.33), (110.49, 100.33), exclude=["w1"])
+    assert path[0] == (90.17, 100.33) and path[-1] == (110.49, 100.33) and len(path) == 4
+    assert not any(sp.query(LineString([a, b]), ("body",)) for a, b in zip(path, path[1:]))
+    up = sp.route((100, 96.19), (110.16, 92.38), start_dir=(0, -1), exclude=["w1"])
+    assert up[1] == pytest.approx((100, 92.38))          # straight out of pin 1 first
+
+
+def test_query_and_find_position(tmp_path):
+    from viaduct.readability import find_position, query_region
+    path = sheet_file(tmp_path, resistor("R1", 100, 100), wire(90, 110, 110, 110, "w1"))
+    items = query_region(path, [95, 95, 105, 105])["items"]
+    assert {"R1", "R1 pin 1", "R1 Reference"} <= {i["id"] for i in items}
+    spot = find_position(path, [100, 100], size=[4, 2])["candidates"][0]
+    box_ = box(spot["x"] - 2, spot["y"] - 1, spot["x"] + 2, spot["y"] + 1)
+    assert query_region(path, list(box_.bounds), ["body", "wire", "text"], distance=0.2)["count"] == 0
+
+
+def _plan(tmp_path, *items, rules=None):
+    r = plan_fixes(sheet_file(tmp_path, *items), rules=rules)
+    return r["sheets"][0] if r["sheets"] else None
+
+
+def test_fix_merges_overlapping_wires(tmp_path):
+    p = _plan(tmp_path, wire(0, 0, 10.16, 0, "a"), wire(5.08, 0, 15.24, 0, "b"), rules=["wire_overlap"])
+    steps = {s["konnect"]: s["args"] for s in p["steps"]}
+    assert set(steps["batch_delete_schematic_wire"]["uuids"]) == {"a", "b"}
+    assert len(steps["batch_add_wire"]["wires"]) == 3 and p["errors_remaining"] == {}
+
+
+def test_fix_adds_missing_dots(tmp_path):
+    p = _plan(tmp_path, wire(0, 10.16, 20.32, 10.16), wire(10.16, 10.16, 10.16, 20.32), rules=["missing_junction"])
+    (step,) = p["steps"]
+    assert step["konnect"] == "batch_add_junction" and step["args"]["positions"] == [{"x": 10.16, "y": 10.16}]
+
+
+def test_fix_routes_a_wire_around_a_symbol(tmp_path):
+    p = _plan(tmp_path, resistor("U1", 100, 100), _labels(("A", 90.17, 100.33), ("B", 110.49, 100.33)),
+              wire(90.17, 100.33, 110.49, 100.33, "w1"), rules=["wire_through_symbol"])
+    steps = {s["konnect"]: s["args"] for s in p["steps"]}
+    assert steps["batch_delete_schematic_wire"]["uuids"] == ["w1"]
+    assert len(steps["batch_add_wire"]["wires"]) == 3 and p["errors_remaining"].get("wire_through_symbol") is None
+
+
+def test_fix_removes_a_dangling_stub_along_a_pin(tmp_path):
+    # from pin 1's tip back down along the pin, ending loose
+    p = _plan(tmp_path, resistor("U1", 100, 100), wire(100, 96.19, 100, 97.0, "stub"), rules=["wire_over_pin"])
+    assert [s["konnect"] for s in p["steps"]] == ["batch_delete_schematic_wire"]
+    assert p["solved"] == {"wire_over_pin (dangling wire removed)": 1}
+
+
+def test_fix_turns_a_label_off_a_wire(tmp_path):
+    # SDA's text runs right, over a vertical wire 2 mm along; turned to 180 it runs left, clear
+    p = _plan(tmp_path, label("SDA", 50.8, 50.8), wire(45.72, 50.8, 50.8, 50.8), wire(52.07, 45.72, 52.07, 55.88),
+              rules=["wire_through_text"])
+    (step,) = p["steps"]
+    assert step["konnect"] == "batch_rotate_labels"
+    assert step["args"]["labels"] == [{"net": "SDA", "x": 50.8, "y": 50.8, "rotation": 180.0}]
+
+
+def test_fix_leaves_labels_konnect_cannot_tell_apart(tmp_path):
+    hier = ('\t(hierarchical_label "SDA" (shape input) (at 50.8 50.8 0) (effects (font (size 1.27 1.27)) '
+            '(justify left)) (uuid "h1"))\n')
+    p = _plan(tmp_path, label("SDA", 50.8, 50.8), hier, wire(45.72, 50.8, 50.8, 50.8),
+              wire(52.07, 45.72, 52.07, 55.88), rules=["wire_through_text"])
+    assert not any(s["konnect"] == "batch_rotate_labels" for s in p["steps"])
+    assert any("same point" in u["reason"] for u in p["unresolved"])
