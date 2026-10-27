@@ -1,0 +1,24 @@
+--- a/common/paths.cpp
++++ b/common/paths.cpp
+@@ -193,6 +193,10 @@
+ {
+     wxString path;
+ 
++    if( wxGetEnv( wxT( "NIX_KICAD10_STOCK_DATA_PATH" ), &path ) ) {
++        return path;
++    }
++
+     if( aRespectRunFromBuildDir && RunningFromBuildDir() )
+     {
+         // Allow debugging from build dir by placing relevant files/folders in the build root
+@@ -244,6 +248,10 @@
+ {
+     wxString path;
+ 
++    if( wxGetEnv( wxT( "NIX_KICAD10_STOCK_DATA_PATH" ), &path ) ) {
++        return path;
++    }
++
+ #if defined( __WXMAC__ )
+     path = GetOSXKicadMachineDataDir();
+ #elif defined( __WXMSW__ )

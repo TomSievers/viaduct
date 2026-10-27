@@ -41,6 +41,9 @@ Also missing from the API:
 
 ## Bugs found while building the board setup tools
 
+Before reporting one upstream, check it on KiCad's newest master and 10.0 branch:
+[docs/kicad-upstream.md](docs/kicad-upstream.md).
+
 - **KiCad 10.0.7: `SetNetClasses` with `MMM_REPLACE` hangs pcbnew.** Once any net's effective
   netclass has been looked up (`GetNetClassForNets`, which every `check_plan` does), a
   replace-mode `SetNetClasses` that changes a value leaves pcbnew at full CPU and every

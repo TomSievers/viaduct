@@ -1,0 +1,65 @@
+{
+  "nodes": {
+    "kicad-10": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793041724,
+        "narHash": "sha256-0OlQaXrO8JtXqZFVV0qxuLsyy/SWf3/VvoTb4fGB1fo=",
+        "ref": "10.0",
+        "rev": "f4fb7776ffced64c48c602ebd0bb960e04ff1e6c",
+        "shallow": true,
+        "type": "git",
+        "url": "https://gitlab.com/kicad/code/kicad.git"
+      },
+      "original": {
+        "ref": "10.0",
+        "shallow": true,
+        "type": "git",
+        "url": "https://gitlab.com/kicad/code/kicad.git"
+      }
+    },
+    "kicad-master": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793046849,
+        "narHash": "sha256-QMGXuxZMM4S+7VfuvTHJcy+XmDiSuE9nQ9GWN3bvBAY=",
+        "ref": "master",
+        "rev": "91aa8a8b34c826307ddde227046acd9bcef17fab",
+        "shallow": true,
+        "type": "git",
+        "url": "https://gitlab.com/kicad/code/kicad.git"
+      },
+      "original": {
+        "ref": "master",
+        "shallow": true,
+        "type": "git",
+        "url": "https://gitlab.com/kicad/code/kicad.git"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1792812153,
+        "narHash": "sha256-T2+XBfNbf9pecLUWS4+RtuVNZ3W8K5taG5QdV71mWlk=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "674a2028661e550a97400c1cc992b9cca9a668a1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "kicad-10": "kicad-10",
+        "kicad-master": "kicad-master",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

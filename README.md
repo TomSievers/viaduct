@@ -144,6 +144,9 @@ nix develop -c sh -c 'PYTHONPATH=src python -m pytest'   # with Nix
 .venv/bin/pip install pytest && .venv/bin/python -m pytest   # with a pip install
 ```
 
+To check a KiCad bug against KiCad's newest code before reporting it, `kicad-upstream/`
+builds master and the 10.0 branch from source: [docs/kicad-upstream.md](docs/kicad-upstream.md).
+
 Viaduct tracks the newest releases and drops support for older ones; there are no
 compatibility code paths. The flake follows `nixpkgs-unstable`, and builds the pure-Python
 dependencies where nixpkgs lags behind PyPI itself (the `newer` table in `flake.nix`).
