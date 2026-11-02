@@ -54,7 +54,7 @@ def files(board: str) -> tuple[Path, Path]:
     if pcb.suffix != ".kicad_pcb":
         raise ValueError(f"expected a .kicad_pcb file, got {pcb.name}")
     if not pcb.exists():
-        raise FileNotFoundError(pcb)
+        raise FileNotFoundError(f"file not found: {pcb}")
     return pcb, pcb.with_suffix(".kicad_pro")
 
 

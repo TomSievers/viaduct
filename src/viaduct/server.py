@@ -19,14 +19,14 @@ from pathlib import Path
 
 import anyio
 from mcp.server.mcpserver import Context, MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.stdio import stdio_server
 
 from viaduct import __version__, connectivity, fanout, kicad_io, plan as planmod, readability, setup_files, silk
+from viaduct.errors import ViaductServer
 from viaduct.headless import Headless, stranded_editors
 
-mcp = MCPServer("viaduct", instructions=(
+mcp = ViaductServer("viaduct", instructions=(
     "Viaduct is experimental and works next to Konnect: it holds features Konnect treats as out of "
     "scope and features still being tried out. Tools may change or disappear between versions; a "
     "tool is removed once Konnect releases the same capability, so prefer Konnect where both exist. "
@@ -647,10 +647,7 @@ def open_headless(board: str, copy: bool = False, timeout: float = 60.0) -> dict
     Linux: pcbnew on a virtual display, needs pcbnew and xvfb-run. Windows (experimental): pcbnew
     started with its windows hidden, found under Program Files or set with VIADUCT_PCBNEW.
     """
-    try:
-        started = headless.start(board, copy=copy, timeout=timeout)
-    except (RuntimeError, ValueError) as e:
-        raise ToolError(str(e)) from e     # any other exception's text never reaches the client
+    started = headless.start(board, copy=copy, timeout=timeout)
     if started.get("already_open"):
         b = session.board()
         return {**started, "opened": b.name, "copper_layers": b.get_copper_layer_count()}
@@ -664,7 +661,7 @@ def open_headless(board: str, copy: bool = False, timeout: float = 60.0) -> dict
         except Exception as e:
             if "not ready" not in str(e).lower() or time.monotonic() > deadline:
                 headless.stop()
-                raise ToolError(f"hidden editor started but the board never became ready: {e}") from e
+                raise RuntimeError(f"hidden editor started but the board never became ready: {e}") from e
             time.sleep(1)
     return {**started, "opened": b.name, "copper_layers": layers,
             "ready_after_s": round(timeout - (deadline - time.monotonic()), 1)}

@@ -25,7 +25,7 @@ def root_of(schematic: str | Path) -> Path:
     if path.suffix != ".kicad_sch":
         raise ValueError(f"expected a .kicad_sch or .kicad_pro file, got {path.name}")
     if not path.exists():
-        raise FileNotFoundError(path)
+        raise FileNotFoundError(f"file not found: {path}")
     return path
 
 
