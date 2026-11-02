@@ -361,8 +361,9 @@ def place_references(references: list[str] | None = None, sizes: list[float | No
     edge and the other references. Spots close to the part and horizontal at the current size
     are tried first; then the smaller sizes, then vertical. sizes are character heights to try,
     in order; null is the current size (default [null, 0.8]; keep the last at or above the
-    board's minimum text height). references limits the run to those parts; the others stay put
-    and are avoided. Hidden references stay hidden unless include_hidden.
+    board's minimum text height). references limits the run to those parts, hidden ones included;
+    the others stay put and are avoided. Without references, hidden ones stay hidden unless
+    include_hidden.
 
     Without apply this is a dry run: rows say where each reference would go, and moves is ready
     for move_footprint_texts. apply=true moves them all in one KiCad commit (one Ctrl+Z) and

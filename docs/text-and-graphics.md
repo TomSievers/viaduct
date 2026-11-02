@@ -44,6 +44,9 @@ references.
 
 Spots close to the part and horizontal at the current size are tried first, then the smaller
 `sizes`, then vertical text. References that fit nowhere are hidden (`hide_unplaced`).
+Naming a hidden reference in `references` tries it again; a run over the whole board leaves
+hidden ones alone unless `include_hidden`. References outside `references` stay where they are
+and are avoided.
 Keep the last size at or above the board's minimum text height.
 
 Without `apply` it is a dry run: the rows say where each reference would go, and `moves` is

@@ -1048,11 +1048,31 @@ def _silk_side(layer: int) -> str | None:
     return {"F.SilkS": "F", "B.SilkS": "B"}.get(layer_name(layer))
 
 
-def silk_scene(board, include_hidden: bool = False) -> silk.SilkScene:
+def _reference_role(ref: str, visible: bool, references: list[str] | None, include_hidden: bool) -> str | None:
+    """What a run does with a Reference on silkscreen: "place" it, "avoid" it where it is, or
+    ignore it (None). Naming a reference asks for it, hidden or not; only printed text is in the way."""
+    if references is None:
+        return "place" if visible or include_hidden else None
+    if ref in references:
+        return "place"
+    return "avoid" if visible else None
+
+
+def _missing_references(missing: list[str], layers: dict[str, str]) -> str:
+    """Why these references cannot be placed: no such footprint, or not on silkscreen."""
+    parts = []
+    if unknown := [r for r in missing if r not in layers]:
+        parts.append(f"no footprint with reference {unknown}")
+    if elsewhere := {r: layers[r] for r in missing if r in layers}:
+        parts.append(f"Reference not on a silkscreen layer, so it cannot be placed: {elsewhere}")
+    return "; ".join(parts) + ". Nothing was changed: leave these out and retry"
+
+
+def silk_scene(board, include_hidden: bool = False, references: list[str] | None = None) -> silk.SilkScene:
     """Everything reference placement must avoid, read from the live board.
 
-    Labels are the Reference fields on a silkscreen layer (hidden ones only with
-    include_hidden); other visible silk text stays where it is and is avoided.
+    Labels are the Reference fields on a silkscreen layer to place (see _reference_role); all
+    other visible silk text, the references outside the run included, is avoided where it is.
     """
     scene = silk.SilkScene(_outline(board), [])
     for side in "FB":
@@ -1097,10 +1117,13 @@ def silk_scene(board, include_hidden: bool = False) -> silk.SilkScene:
                 if tside is None:
                     continue
                 if p.name == "Reference":
-                    if visible or include_hidden:
+                    role = _reference_role(ref, visible, references, include_hidden)
+                    if role == "place":
                         a = t.attributes
                         scene.labels.append(silk.Label(ref, tside, t.text, anchor, mm(a.size.y_nm),
                                                        mm(a.stroke_width.value_nm)))
+                    elif role == "avoid":
+                        scene.texts[tside].append(_text_area(t))
                     continue
                 if visible:
                     scene.texts[tside].append(_text_area(t))
@@ -1124,13 +1147,14 @@ def place_references(board, rules: silk.Rules, references: list[str] | None = No
                      include_hidden: bool = False, hide_unplaced: bool = True, apply: bool = False) -> dict:
     """Find a readable spot for each Reference (silk.place) and, with apply, move them all in
     one commit; references that fit nowhere are hidden when hide_unplaced."""
-    scene = silk_scene(board, include_hidden)
-    known = {lb.ref for lb in scene.labels}
+    references = references or None
+    scene = silk_scene(board, include_hidden, references)
     if references:
-        missing = sorted(set(references) - known)
+        missing = sorted(set(references) - {lb.ref for lb in scene.labels})
         if missing:
-            raise ValueError(f"no Reference on a silkscreen layer for {missing}"
-                             + ("" if include_hidden else " (hidden ones need include_hidden=true)"))
+            raise ValueError(_missing_references(missing, {fp.reference_field.text.value:
+                                                           layer_name(fp.reference_field.layer)
+                                                           for fp in board.get_footprints()}))
     rows = silk.place(scene, rules, references)
     planned = silk.moves(rows, hide_unplaced)
     out = {"placed": sum(r["placed"] for r in rows), "unplaced": [r["reference"] for r in rows if not r["placed"]],

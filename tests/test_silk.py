@@ -1,6 +1,6 @@
 from shapely.geometry import box
 
-from viaduct import silk
+from viaduct import kicad_io, silk
 
 
 def _scene(labels, **kw):
@@ -102,3 +102,37 @@ def test_text_stays_inside_the_board_edge():
     [row] = silk.place(_scene([lb]))
     assert row["placed"]
     assert box(0.35, 0.35, 39.65, 29.65).contains(_box(row, lb))
+
+
+def test_a_run_over_the_whole_board_leaves_hidden_references_alone():
+    role = kicad_io._reference_role
+    assert role("R1", True, None, False) == "place"
+    assert role("R1", False, None, False) is None
+    assert role("R1", False, None, True) == "place"
+
+
+def test_naming_a_reference_places_it_even_when_hidden():
+    # hide_unplaced hides what did not fit, so a retry names references that are hidden by now
+    assert kicad_io._reference_role("R1", False, ["R1"], False) == "place"
+    assert kicad_io._reference_role("R1", True, ["R1"], False) == "place"
+
+
+def test_references_outside_the_run_are_avoided_only_when_printed():
+    role = kicad_io._reference_role
+    assert role("R2", True, ["R1"], False) == "avoid"
+    assert role("R2", False, ["R1"], False) is None
+    assert role("R2", False, ["R1"], True) is None     # nothing is printed there to run into
+
+
+def test_a_reference_left_in_place_is_not_landed_on():
+    a = _label("R1", 20, 15)
+    free = silk.place(_scene([a]), references=["R1"])[0]
+    in_place = silk.text_box("R2", free["x"], free["y"], free["size"], 0.15, free["rotation"])
+    moved = silk.place(_scene([a], texts=[in_place]), references=["R1"])[0]
+    assert moved["placed"] and not _box(moved, a).intersects(in_place)
+
+
+def test_a_refused_reference_says_why():
+    message = kicad_io._missing_references(["C31", "NOPE"], {"C31": "F.Fab", "R1": "F.SilkS"})
+    assert "no footprint with reference ['NOPE']" in message
+    assert "{'C31': 'F.Fab'}" in message and "Nothing was changed" in message
