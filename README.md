@@ -35,6 +35,9 @@ Which tool is which, with the Konnect issues: [docs/konnect.md](docs/konnect.md)
 - **Board setup.** Netclasses, text variables, origins and copper layers live on the open
   board; the stackup, layer names, mask and paste and other settings the API cannot reach,
   in the files while KiCad has the project closed. [Board setup](docs/board-setup.md)
+- **Schematic readability.** `check_readability` checks every sheet against layout rules,
+  such as wires through labels, crossings and wires leaving pins sideways, with severities
+  and accepted findings set in `viaduct.toml`. [Readability](docs/readability.md)
 - **A hidden editor.** `open_headless` runs a PCB editor nobody sees, on a copy of the
   project, so work can be tried out before it touches the user's board.
   [Headless editing](docs/headless.md)
@@ -89,6 +92,17 @@ need the project closed in KiCad.
 | `set_mask_and_paste` | Solder mask and paste clearances, via tenting, covering, plugging, capping, filling (file) |
 | `set_project_settings` | Violation severities, teardrop, length-tuning and text and graphics defaults (file) |
 | `edit_netclass_file` | Removes a netclass or unsets its fields so they come from Default (file) |
+
+**Schematic readability**: [details](docs/readability.md)
+
+| Tool | What it does |
+|---|---|
+| `check_readability` | Checks every sheet against layout rules (wires through text or symbols, crossings, pin exits, overlaps, ...); changes nothing |
+| `list_readability_rules` | Each rule with its description, options and the severity the config gives it |
+| `plan_readability_fixes` | Konnect calls that solve the error findings: wires merged or rerouted, dots added, labels turned, fields moved |
+| `query_schematic_region` | What lies in or near a rectangle of a sheet: wires, drawings, bodies, text, pins, junctions |
+| `find_clear_position` | Nearest spots where a box, a field or a whole symbol fits clear of everything, in milliseconds |
+| `route_schematic_wire` | An orthogonal wire path between two points that avoids parts, text and pins and meets no other wire |
 
 **Editor and server**: [headless editing](docs/headless.md)
 
