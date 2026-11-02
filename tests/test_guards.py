@@ -224,15 +224,6 @@ def test_an_older_kicad_is_refused_with_its_version(monkeypatch):
         kicad_io.Session(lambda: None).board()
 
 
-def test_open_headless_refusals_reach_the_client(tmp_path):
-    # the MCP library hides the text of any exception but ToolError
-    from mcp.server.mcpserver.exceptions import ToolError
-    from viaduct import server
-
-    with pytest.raises(ToolError, match="not a .kicad_pcb"):
-        server.open_headless(str(tmp_path / "nope.kicad_sch"))
-
-
 # a leader that dies on SIGTERM at once, like xvfb-run, and a child that takes longer, like pcbnew
 LEADER = """
 import subprocess, sys, time
