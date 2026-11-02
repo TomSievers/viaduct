@@ -19,18 +19,20 @@ from pathlib import Path
 
 import anyio
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.stdio import stdio_server
 
 from viaduct import __version__, connectivity, fanout, kicad_io, plan as planmod, readability, setup_files, silk
-from viaduct.headless import Headless
+from viaduct.headless import Headless, stranded_editors
 
 mcp = MCPServer("viaduct", instructions=(
     "Viaduct is experimental and works next to Konnect: it holds features Konnect treats as out of "
     "scope and features still being tried out. Tools may change or disappear between versions; a "
     "tool is removed once Konnect releases the same capability, so prefer Konnect where both exist. "
     "Viaduct edits copper on the board open in KiCad's PCB editor, or in a hidden editor started "
-    "with open_headless (then every tool targets the hidden board until close_headless). Units are "
+    "with open_headless (then every tool targets the hidden board until close_headless; Konnect "
+    "reaches it too, given the board's real path). Units are "
     "millimetres. Always call check_plan before apply_plan, fix every violation, and pass the "
     "board_token check_plan returns: apply_plan refuses a plan that fails its check or that was "
     "checked against a board that has changed since. Writes are single KiCad commits (one undo "
@@ -630,15 +632,28 @@ def save_board() -> dict:
 
 
 @mcp.tool()
-def open_headless(board: str, copy: bool = True, timeout: float = 60.0) -> dict:
-    """Open a board in a hidden PCB editor; all tools then target it.
+def open_headless(board: str, copy: bool = False, timeout: float = 60.0) -> dict:
+    """Make a board available to the API, in a hidden PCB editor if KiCad does not have it open.
 
-    copy=true (default) works on a private copy of the project, so the user's KiCad can stay open
-    on the original. copy=false opens the file itself and is refused while KiCad has it open.
+    By default this is the real board, on KiCad's default API socket, so Viaduct and Konnect both
+    reach it. Pass Konnect the path returned as board: for any other path Konnect edits that file on
+    disk instead. Edits stay in the editor's memory until saved (save_board, close_headless(save=true)).
+    If KiCad already has this board open it is used as is (already_open), with no hidden editor. If
+    KiCad has another board open, this is refused, since only one process can hold that socket.
+
+    copy=true works on a private copy of the project on a private socket, so the user's KiCad can stay
+    open: only Viaduct reaches it (konnect_reachable is false). It lacks the schematic and custom rules.
+
     Linux: pcbnew on a virtual display, needs pcbnew and xvfb-run. Windows (experimental): pcbnew
     started with its windows hidden, found under Program Files or set with VIADUCT_PCBNEW.
     """
-    started = headless.start(board, copy=copy, timeout=timeout)
+    try:
+        started = headless.start(board, copy=copy, timeout=timeout)
+    except (RuntimeError, ValueError) as e:
+        raise ToolError(str(e)) from e     # any other exception's text never reaches the client
+    if started.get("already_open"):
+        b = session.board()
+        return {**started, "opened": b.name, "copper_layers": b.get_copper_layer_count()}
     # the socket opens before the board has loaded; KiCad answers "not ready" until then
     deadline = time.monotonic() + timeout
     while True:
@@ -649,7 +664,7 @@ def open_headless(board: str, copy: bool = True, timeout: float = 60.0) -> dict:
         except Exception as e:
             if "not ready" not in str(e).lower() or time.monotonic() > deadline:
                 headless.stop()
-                raise RuntimeError(f"hidden editor started but the board never became ready: {e}") from e
+                raise ToolError(f"hidden editor started but the board never became ready: {e}") from e
             time.sleep(1)
     return {**started, "opened": b.name, "copper_layers": layers,
             "ready_after_s": round(timeout - (deadline - time.monotonic()), 1)}
@@ -659,8 +674,10 @@ def open_headless(board: str, copy: bool = True, timeout: float = 60.0) -> dict:
 def close_headless(save: bool = False, keep_files: bool | None = None) -> dict:
     """Close the hidden editor; tools target the user's KiCad again.
 
-    save=true saves the hidden board first. For a copy, keep_files (default: same as save)
-    keeps it on disk and returns its path; otherwise the private copy is deleted.
+    save=true saves the hidden board first. save=false discards every unsaved edit, Konnect's
+    included. For a copy, keep_files (default: same as save) keeps it on disk and returns its
+    path; otherwise the private copy is deleted. A warning names any KiCad opened in the meantime:
+    it stays out of reach until restarted, since the socket it could not take is free only now.
     """
     if not headless.running:
         return {"stopped": False, "reason": "no headless editor is open"}
@@ -669,7 +686,11 @@ def close_headless(save: bool = False, keep_files: bool | None = None) -> dict:
         session.board().save()
         saved = str(headless.board)
     result = headless.stop(keep_files=save if keep_files is None else keep_files)
-    return {**result, "saved": saved}
+    result["saved"] = saved
+    if stranded := stranded_editors():
+        result["warning"] = (f"KiCad opened during the hidden session is on its own socket, out of reach of "
+                             f"Viaduct and Konnect until restarted: {stranded}")
+    return result
 
 
 @mcp.tool()

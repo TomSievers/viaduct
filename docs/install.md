@@ -83,7 +83,7 @@ don't see it ([details](headless.md)):
 | Platform | How | Status |
 |---|---|---|
 | Linux, native KiCad | `pcbnew` on a virtual display (`xvfb-run`) | Supported, tested |
-| Linux, Flatpak KiCad | – | Not supported yet (untested): the Flatpak keeps its own `/tmp`, where the hidden editor's private socket would be out of reach. Live tools work with the Flatpak. |
+| Linux, Flatpak KiCad | – | Not supported yet (untested): the Flatpak keeps its own `/tmp`, where a hidden editor's socket would be out of reach. Live tools work with the Flatpak. |
 | Windows | `pcbnew.exe` started with its windows hidden | Experimental, not yet tested on Windows |
 
 On Windows there is no virtual display, so a window KiCad opens on its own could still
@@ -96,6 +96,7 @@ error message includes.
 |---|---|
 | `VIADUCT_SOURCE` | The checkout `reload_server` loads new code from |
 | `KICAD_API_SOCKET` | KiCad's API socket, if it is not in the default place (`/tmp/kicad/api.sock`, `%TEMP%\kicad\api.sock`, or the Flatpak's) |
+| `KICAD_API_SOCKET` on **Konnect** | Set to `ipc:///tmp/kicad/api.sock` so Konnect reaches a hidden editor started after it ([details](headless.md)) |
 | `VIADUCT_PCBNEW` | The `pcbnew` executable for the hidden editor |
 | `VIADUCT_XVFB_RUN` | The `xvfb-run` executable for the hidden editor (Linux) |
 
@@ -108,6 +109,9 @@ Pass them to the server with `-e NAME=value` on `claude mcp add`.
 - **`claude mcp list` shows viaduct as failed**: run the `viaduct` command from the line you
   gave `claude mcp add` in a terminal; it prints the Python error. An `ImportError` usually
   means the install step was run with a different Python than the venv's.
+- **`open_headless` says another KiCad holds the socket**: only one KiCad process can serve
+  the default socket. Open the board in that KiCad, close it, or use `copy=true`, which only
+  Viaduct can reach.
 - **`open_headless` times out**: most likely a dialog is waiting in the hidden editor, such
   as a question KiCad asks on its first start. Open the same board once in your normal KiCad
   and answer any question there, then try again; the error includes the editor's log tail.

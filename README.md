@@ -38,8 +38,9 @@ Which tool is which, with the Konnect issues: [docs/konnect.md](docs/konnect.md)
 - **Schematic readability.** `check_readability` checks every sheet against layout rules,
   such as wires through labels, crossings and wires leaving pins sideways, with severities
   and accepted findings set in `viaduct.toml`. [Readability](docs/readability.md)
-- **A hidden editor.** `open_headless` runs a PCB editor nobody sees, on a copy of the
-  project, so work can be tried out before it touches the user's board.
+- **A hidden editor.** `open_headless` runs a PCB editor nobody sees when KiCad isn't open,
+  and Konnect can use it too. With `copy=true` it works on a private copy, so work can be
+  tried out before it touches the user's board.
   [Headless editing](docs/headless.md)
 
 Routing helpers (point-to-point routing, multilayer autorouting) come next and build on the
@@ -108,7 +109,7 @@ need the project closed in KiCad.
 
 | Tool | What it does |
 |---|---|
-| `open_headless` | Opens a board in a hidden PCB editor; every tool then targets it |
+| `open_headless` | Opens a board in a hidden PCB editor (or uses KiCad if it has it open); every tool, and Konnect, then targets it |
 | `close_headless` | Closes it, optionally saving; tools target the user's KiCad again |
 | `headless_status` | Whether a hidden editor is open, on which board |
 | `reload_server` | Rebuilds and loads the newest Viaduct code into the running server |

@@ -17,7 +17,7 @@ Ctrl+Z), read back afterwards. Footprints and copper are never touched.
   since moving copper here would skip the clearance checks; so is a copper target layer.
   Locked items move only with `include_locked`.
 
-For a board KiCad does not have open, use `open_headless(copy=false)`, move, then
+For a board KiCad does not have open, use `open_headless`, move, then
 `save_board`: the same API path, no direct file editing needed.
 
 ## Batches
