@@ -5,9 +5,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from kipy.project_types import NetClass
+from kipy.proto.common.types import project_settings_pb2 as ps
 from shapely.geometry import box
 
-from viaduct import geometry, kicad_io
+from viaduct import geometry, kicad_io, plan
 from viaduct import headless as hl
 from viaduct.headless import Headless, hidden_env, lock_file
 from viaduct.model import BoardModel, Copper
@@ -275,6 +277,22 @@ def test_an_editor_ignoring_sigterm_is_killed(tmp_path, monkeypatch):
     assert not stat.exists() or stat.read_text().rpartition(") ")[2].startswith("Z")
 
 
+class _FakeBoard:
+    def get_nets(self):
+        from kipy.board_types import Net
+        n = Net()
+        n.name = "GND"
+        return [n]
+
+
+def test_plan_zones_really_carry_their_thermal_settings():
+    """kipy's thermal_spokes setters write to a copy: read back what would go to KiCad."""
+    p = plan.parse({"zones": [{"net": "GND", "layer": "F.Cu", "outline": [[0, 0], [10, 0], [10, 10]],
+                               "thermal_gap": 0.3, "thermal_spoke_width": 0.6}]})
+    zone = kicad_io.build_items(_FakeBoard(), p)[0]
+    assert kicad_io._connection(zone) == {"connection": "thermal", "thermal_gap": 0.3, "thermal_spoke_width": 0.6}
+
+
 def test_session_reconnects_when_another_kicad_took_the_socket(monkeypatch):
     class Client:
         made = 0
@@ -297,3 +315,15 @@ def test_session_reconnects_when_another_kicad_took_the_socket(monkeypatch):
     assert session.board() == "board 1"
     Client.stale = True
     assert session.board() == "board 2"
+
+
+@pytest.mark.parametrize("constituents, name", [(["RF", "Default"], "RF"), (["RF", "Gate", "Default"], "RF, Gate")])
+def test_net_class_names_come_from_the_constituents(constituents, name):
+    nc = NetClass(ps.NetClass(name="Effective for net: X", type=ps.NetClassType.NCT_IMPLICIT,
+                              constituents=constituents))
+    assert kicad_io._class_name(nc) == name
+
+
+def test_a_net_in_one_explicit_class_has_no_constituents():
+    nc = NetClass(ps.NetClass(name="Default", type=ps.NetClassType.NCT_EXPLICIT, constituents=["Default"]))
+    assert kicad_io._class_name(nc) == "Default"

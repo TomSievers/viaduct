@@ -14,7 +14,8 @@ result as a plan too.
   "vias":   [{"net": "GND", "at": [108.56, 113.2], "diameter": 0.6, "drill": 0.3, "locked": true}],
   "zones":  [{"net": "GND", "layer": "In1.Cu", "name": "GND_In1",
               "outline": [[100.3, 100.3], [159.7, 100.3], [159.7, 137.7], [100.3, 137.7]],
-              "priority": 0, "clearance": 0.2, "min_thickness": 0.2}],
+              "priority": 0, "clearance": 0.2, "min_thickness": 0.2,
+              "connection": "thermal", "thermal_gap": 0.5, "thermal_spoke_width": 0.5}],
   "field_moves":   [{"reference": "R5", "text": "Reference", "dx": 0, "dy": -1.2}],
   "graphic_moves": [{"id": "<text, shape or dimension uuid>", "x": 120, "y": 80, "rotation": 90}]
 }
@@ -22,6 +23,11 @@ result as a plan too.
 
 Pass it inline (`plan`) or as a path (`plan_file`). All values are millimetres. Tracks and
 vias with `"locked": true` are created locked, so an autorouter leaves them alone.
+
+Zones join pads of their net with `connection`: `thermal` (the default), `pth_thermal`, `full` or
+`none`. `thermal_gap` defaults to 0.5 mm and `thermal_spoke_width` to 0.5 mm or the zone's
+`min_thickness` if that is larger. The API cannot read the board's own zone defaults, so these
+are Viaduct's.
 
 ## What is checked
 
@@ -31,6 +37,8 @@ vias with `"locked": true` are created locked, so an autorouter leaves them alon
   `edge_clearance`). The API cannot read the board's own constraints, so these are arguments.
 - Nets and layers exist; deletes name a track, arc, via or zone that is there.
 - Zones are not obstacles: they refill around new copper.
+- A zone's thermal spokes are at least its minimum thickness (`thermal_spoke`). Narrower spokes
+  are not filled at all, and KiCad reports no error while the pads are cut off.
 
 `assume_copper_layers` checks a plan for a stackup that is about to be enabled.
 

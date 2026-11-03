@@ -69,3 +69,29 @@ def islands(model: BoardModel, net: str) -> list[dict]:
     for i, r in enumerate(result):
         r["main"] = i == 0
     return result
+
+
+def summary(model: BoardModel, nets: list[str] | None = None, only_broken: bool = False) -> list[dict]:
+    """One row per net, by name: its copper and how many groups that copper falls apart in.
+
+    cut_off_pads counts the pads outside the main group, as listed by net_islands.
+    """
+    unknown = sorted(set(nets or ()) - model.nets)
+    if unknown:
+        raise ValueError(f"no such nets on this board: {unknown}")
+    by_net: dict[str, list[Copper]] = {}
+    for c in model.items:
+        by_net.setdefault(c.net, []).append(c)
+    rows = []
+    for net in sorted(nets if nets is not None else model.nets):
+        groups = islands(model, net)
+        if only_broken and len(groups) < 2:
+            continue
+        kinds = [c.kind for c in by_net.get(net, [])]
+        rows.append({"net": net, "class": model.net_class.get(net), "pads": kinds.count("pad"),
+                     "tracks": kinds.count("track") + kinds.count("arc"), "vias": kinds.count("via"),
+                     "zones": kinds.count("zone"),
+                     "track_mm": round(sum(c.length or 0 for c in by_net.get(net, [])), 3),
+                     "islands": len(groups),
+                     "cut_off_pads": sum(len(g["pads"]) for g in groups if not g["main"])})
+    return rows

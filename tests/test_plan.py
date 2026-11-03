@@ -119,3 +119,56 @@ def test_moves_must_be_lists_of_objects():
 def test_moving_an_item_the_plan_deletes_is_a_conflict():
     p = plan.parse({"delete": ["t1"], "graphic_moves": [{"id": "t1", "dx": 1, "dy": 0}]})
     assert [v["rule"] for v in plan.check(board(), p)] == ["move_deleted"]
+
+
+ZONE = {"net": "GND", "layer": "F.Cu", "outline": [[0, 0], [10, 0], [10, 10]]}
+
+
+def test_plan_zones_get_thermal_relief_by_default():
+    z = plan.parse({"zones": [ZONE]}).zones[0]
+    assert (z.connection, z.thermal_gap, z.thermal_spoke_width) == ("thermal", 0.5, 0.5)
+
+
+def test_default_spoke_follows_a_thick_zone():
+    z = plan.parse({"zones": [{**ZONE, "min_thickness": 0.8}]}).zones[0]
+    assert z.thermal_spoke_width == 0.8
+    assert plan.check(board(), plan.parse({"zones": [{**ZONE, "min_thickness": 0.8}]})) == []
+
+
+@pytest.mark.parametrize("zone", [{"thermal_spoke_width": 0}, {"thermal_spoke_width": 0.1},
+                                  {"thermal_spoke_width": 0.4, "min_thickness": 0.5},
+                                  {"connection": "pth_thermal", "thermal_spoke_width": 0.1}])
+def test_spokes_below_min_thickness_are_a_violation(zone):
+    rules = [v["rule"] for v in plan.check(board(), plan.parse({"zones": [{**ZONE, **zone}]}))]
+    assert rules == ["thermal_spoke"]
+
+
+def test_spokes_do_not_matter_without_thermal_relief():
+    p = plan.parse({"zones": [{**ZONE, "connection": "full", "thermal_spoke_width": 0}]})
+    assert plan.check(board(), p) == []
+
+
+@pytest.mark.parametrize("zone, message", [({"connection": "solid"}, "connection"), ({"thermal_gap": -1}, "thermal_gap")])
+def test_bad_zone_connection_values_are_refused(zone, message):
+    with pytest.raises(ValueError, match=message):
+        plan.parse({"zones": [{**ZONE, **zone}]})
+
+
+def test_net_summary_counts_copper_and_breaks():
+    far = Copper("p3", "pad", "GND", {"F.Cu": box(50, 5, 51, 6)}, ref="C2.2", at=(50.5, 5.5))
+    t = Copper("t2", "track", "SIG", {"F.Cu": geometry.track(30, 20, 40, 20, 0.2)}, width=0.2, length=10.0)
+    arc = Copper("a1", "arc", "SIG", {"F.Cu": geometry.track(40, 20, 42, 20, 0.2)}, width=0.2, length=2.5)
+    m = board([far, t, arc])
+    m.net_class = {"GND": "Power"}
+    rows = {r["net"]: r for r in connectivity.summary(m)}
+    assert rows["GND"] == {"net": "GND", "class": "Power", "pads": 2, "tracks": 0, "vias": 1, "zones": 0,
+                           "track_mm": 0, "islands": 3, "cut_off_pads": 1}
+    assert (rows["SIG"]["tracks"], rows["SIG"]["track_mm"], rows["SIG"]["islands"]) == (3, 12.5, 1)
+    assert rows["SIG"]["class"] is None
+    assert [r["net"] for r in connectivity.summary(m, only_broken=True)] == ["GND"]
+    assert [r["net"] for r in connectivity.summary(m, ["SIG"])] == ["SIG"]
+
+
+def test_net_summary_refuses_unknown_nets():
+    with pytest.raises(ValueError, match="NOPE"):
+        connectivity.summary(board(), ["NOPE"])

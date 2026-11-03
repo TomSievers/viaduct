@@ -26,6 +26,11 @@ class Copper:
     drill: float | None = None     # drill diameter, pads and vias only
     at: tuple[float, float] | None = None
     width: float | None = None     # tracks only
+    start: tuple[float, float] | None = None   # tracks and arcs: exact ends, to join new copper to
+    mid: tuple[float, float] | None = None     # arcs only
+    end: tuple[float, float] | None = None
+    length: float | None = None    # tracks and arcs
+    locked: bool | None = None     # tracks, arcs and vias
 
     @property
     def layers(self) -> list[str]:
@@ -49,6 +54,7 @@ class BoardModel:
     net_clearance: dict[str, float] = field(default_factory=dict)
     default_clearance: float = 0.2
     nets: set[str] = field(default_factory=set)
+    net_class: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         self._index: dict[str, tuple[STRtree, list[Copper]]] = {}
