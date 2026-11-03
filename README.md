@@ -2,22 +2,22 @@
 
 > [!WARNING]
 > **Warning: the tool set is not stable.** Tools may be added, changed or removed without
-> notice. A tool is removed once the same capability lands in a released version of
-> [Konnect](https://github.com/mixelpixx/Konnect).
+> notice.
 
-An MCP server for KiCad that works next to Konnect, over the same official IPC API
-(`kicad-python`). It has two jobs:
+An MCP server for KiCad that works next to
+[Konnect v0.13.0](https://github.com/mixelpixx/Konnect/releases/tag/v0.13.0), over the same
+official IPC API (`kicad-python`). It has two jobs:
 
-1. **Features Konnect treats as out of scope.** Konnect deliberately exposes KiCad's own
-   capabilities and does not become a second router or PCB editor. Work that needs
-   Konnect-owned logic, such as checked copper plans, connectivity analysis, routing
-   helpers and a hidden editor, lives here instead.
+1. **What Konnect v0.13.0 lacks.** Features it is missing are built here, to stay, including
+   checked copper plans, connectivity analysis, routing helpers and a hidden editor.
 2. **A testing ground.** New features and AI workflows (tools, skills, guidance) are tried
-   here first to see what is actually useful. That includes features Konnect plans but has
-   not released yet: they are used here until a Konnect release covers them, and then
-   removed from Viaduct.
+   here first to see what is actually useful.
 
-Which tool is which, with the Konnect issues: [docs/konnect.md](docs/konnect.md).
+**Konnect is now closed source.** It continues as the commercial
+[Konnect-EDA](https://github.com/Orchis-ai-LLC/Konnect-EDA), and the open repository is archived,
+so v0.13.0 is the last open release and the version Viaduct works next to. Viaduct no longer
+tries to avoid duplicating Konnect, and its tools are not stopgaps waiting for a Konnect release.
+More: [docs/konnect.md](docs/konnect.md).
 
 ## What it does
 

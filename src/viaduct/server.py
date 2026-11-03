@@ -27,9 +27,9 @@ from viaduct.errors import ViaductServer
 from viaduct.headless import Headless, stranded_editors
 
 mcp = ViaductServer("viaduct", instructions=(
-    "Viaduct is experimental and works next to Konnect: it holds features Konnect treats as out of "
-    "scope and features still being tried out. Tools may change or disappear between versions; a "
-    "tool is removed once Konnect releases the same capability, so prefer Konnect where both exist. "
+    "Viaduct is experimental and works next to Konnect v0.13.0: it holds features that version lacks "
+    "and features still being tried out, and it may overlap Konnect. Tools may change or disappear "
+    "between versions. "
     "Viaduct edits copper on the board open in KiCad's PCB editor, or in a hidden editor started "
     "with open_headless (then every tool targets the hidden board until close_headless; Konnect "
     "reaches it too, given the board's real path). Units are "
