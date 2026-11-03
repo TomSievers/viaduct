@@ -56,13 +56,14 @@ need the project closed in KiCad.
 | Tool | What it does |
 |---|---|
 | `status` | KiCad version, open board, copper layer count, item counts |
-| `list_copper` | Pads, tracks, arcs, vias or zones with ids, filtered by net, layer or area |
-| `list_zones` | Zones with net, layers, priority, clearance, min thickness, island mode |
+| `list_copper` | Pads, tracks, arcs, vias or zones with ids, track ends and locked state, filtered by net, layer or area |
+| `list_zones` | Zones with net, layers, priority, clearance, min thickness, island mode, pad connection, thermal gap and spoke |
 | `net_islands` | Groups of a net's copper that are joined; more than one group means a broken net |
+| `net_summary` | One row per net: netclass, copper counts, track length, islands, cut-off pads |
 | `check_plan` | Checks a plan without writing: clearances per netclass, holes, board edge, nets, layers |
 | `apply_plan` | Re-checks, applies as one commit, refills zones, reads back |
 | `plan_fanout` | Joins every SMD pad of a plane net to its plane; the plan goes to `apply_plan` |
-| `set_zone_properties` | Name, priority, clearance, min thickness, island removal mode |
+| `set_zone_properties` | Name, priority, clearance, min thickness, island removal mode, pad connection, thermal gap and spoke |
 | `refill_zones`, `save_board` | As named |
 
 **Text and silkscreen**: [details](docs/text-and-graphics.md)

@@ -66,13 +66,21 @@ def status() -> dict:
     }
 
 
+COPPER_FIELDS = ("id", "net", "layers", "ref", "at", "width", "drill", "bbox", "start", "mid", "end", "locked")
+
+
 @mcp.tool()
 def list_copper(kind: str = "via", net: str | None = None, layer: str | None = None,
-                bbox: list[float] | None = None, limit: int = 200) -> dict:
+                bbox: list[float] | None = None, limit: int = 200, fields: list[str] | None = None) -> dict:
     """List copper items with their ids, for building plans.
 
-    kind: pad, track, arc, via or zone. bbox: [x1, y1, x2, y2] in mm.
+    kind: pad, track, arc, via or zone. bbox: [x1, y1, x2, y2] in mm. Tracks and arcs also give
+    their exact start and end (arcs a mid too), and tracks, arcs and vias whether they are locked.
+    fields keeps only those keys of each row, e.g. ["id", "start", "end"].
     """
+    unknown = sorted(set(fields or ()) - set(COPPER_FIELDS))
+    if unknown:
+        raise ValueError(f"unknown fields {unknown}; list_copper has {list(COPPER_FIELDS)}")
     model = kicad_io.read_model(session.board(), with_zones=(kind == "zone"))
     rows = []
     for c in model.items:
@@ -81,14 +89,18 @@ def list_copper(kind: str = "via", net: str | None = None, layer: str | None = N
         b = [round(v, 3) for v in next(iter(c.geom.values())).bounds] if c.geom else None
         if bbox and b and (b[2] < bbox[0] or b[0] > bbox[2] or b[3] < bbox[1] or b[1] > bbox[3]):
             continue
-        rows.append({"id": c.id, "net": c.net, "layers": c.layers, "ref": c.ref, "at": c.at,
-                     "width": c.width, "drill": c.drill, "bbox": b})
+        row = {"id": c.id, "net": c.net, "layers": c.layers, "ref": c.ref, "at": c.at,
+               "width": c.width, "drill": c.drill, "bbox": b,
+               **{k: getattr(c, k) for k in ("start", "mid", "end", "locked") if getattr(c, k) is not None}}
+        rows.append({k: row[k] for k in fields if k in row} if fields else row)
     return {"count": len(rows), "items": rows[:limit], "truncated": len(rows) > limit}
 
 
 @mcp.tool()
 def list_zones() -> list[dict]:
-    """All zones with id, net, layers, priority, clearance, min thickness and island removal mode."""
+    """All zones with id, net, layers, priority, clearance, min thickness, island removal mode,
+    pad connection (thermal, pth_thermal, full, none; inherited on a zone made by an older plan),
+    thermal gap and thermal spoke width."""
     return kicad_io.list_zones(session.board())
 
 
@@ -104,6 +116,23 @@ def net_islands(net: str = "GND") -> dict:
     for g in groups:
         g["item_ids"] = g["item_ids"][:50]
     return {"net": net, "groups": len(groups), "islands": groups}
+
+
+@mcp.tool()
+def net_summary(nets: list[str] | None = None, only_broken: bool = False) -> dict:
+    """One row per net: netclass, pads, tracks, vias, zones, track length, and whether it is joined.
+
+    All nets by default. islands above 1 means the net is broken and cut_off_pads counts the pads
+    outside its main group: net_islands names them. An unfilled zone counts as no copper, so
+    unfilled_zones lists what to refill before believing a broken net; refill too if copper
+    changed since the last fill. No pads and no copper is 0 islands.
+    """
+    board = session.board()
+    rows = connectivity.summary(kicad_io.read_model(board), nets, only_broken)
+    unfilled = [z["name"] or z["id"] for z in kicad_io.list_zones(board)
+                if z["type"] == "ZT_COPPER" and not z["filled"]]
+    return {"count": len(rows), "broken": sum(r["islands"] > 1 for r in rows),
+            "unfilled_zones": unfilled, "nets": rows}
 
 
 @mcp.tool()
@@ -168,7 +197,7 @@ def check_plan(plan: dict | None = None, plan_file: str | None = None, edge_clea
 
     The plan is JSON in mm: {"delete": [ids], "tracks": [{net, layer, start, end, width}],
     "vias": [{net, at, diameter, drill}], "zones": [{net, layer, outline, name, priority,
-    clearance, min_thickness}], "field_moves": [entries as for move_footprint_texts],
+    clearance, min_thickness, connection, thermal_gap, thermal_spoke_width}], "field_moves": [entries as for move_footprint_texts],
     "graphic_moves": [entries as for edit_board_graphics]}. Pass it inline or as a path to a
     JSON file. Moves are applied in the same commit as the copper, and the returned board_token
     also covers every text and graphic the plan moves. assume_copper_layers checks a plan for a
@@ -610,11 +639,16 @@ def set_stackup(board: str, layers: list[dict] | None = None, copper_finish: str
 @mcp.tool()
 def set_zone_properties(zone_id: str, name: str | None = None, priority: int | None = None,
                         clearance: float | None = None, min_thickness: float | None = None,
-                        island_mode: str | None = None) -> dict:
-    """Edit a zone's name, priority, clearance (mm), min thickness (mm) or island removal mode
-    (always, never or area). Refill zones afterwards to see the effect."""
+                        island_mode: str | None = None, connection: str | None = None,
+                        thermal_gap: float | None = None, thermal_spoke_width: float | None = None) -> dict:
+    """Edit a zone's name, priority, clearance (mm), min thickness (mm), island removal mode
+    (always, never or area), pad connection (thermal, pth_thermal, full or none), thermal gap (mm)
+    or thermal spoke width (mm). A spoke width below the min thickness is refused: KiCad would fill
+    no spokes and cut the pads off. Refill zones afterwards to see the effect."""
     return kicad_io.update_zone(session.board(), zone_id, name=name, priority=priority,
-                                clearance=clearance, min_thickness=min_thickness, island_mode=island_mode)
+                                clearance=clearance, min_thickness=min_thickness, island_mode=island_mode,
+                                connection=connection, thermal_gap=thermal_gap,
+                                thermal_spoke_width=thermal_spoke_width)
 
 
 @mcp.tool()

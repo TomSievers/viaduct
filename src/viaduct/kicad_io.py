@@ -9,6 +9,7 @@ All public values are millimetres; KiCad's API uses nanometres.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 
 from google.protobuf.empty_pb2 import Empty
@@ -29,7 +30,7 @@ from shapely.ops import polygonize, unary_union
 
 from viaduct import fanout, geometry, silk
 from viaduct.model import BoardModel, Copper, Hole
-from viaduct.plan import Plan
+from viaduct.plan import Plan, check_connection, spoke_problem
 
 NM = 1e6
 
@@ -102,7 +103,12 @@ class Session:
                 self._kicad = kicad
             return self._kicad.get_board()
         except Exception as e:
+            # another KiCad now holds this socket, e.g. a new hidden editor: this client still
+            # sends the old one's token, so connect again
+            stale = self._kicad is not None and "kicad_token" in str(e)
             self._kicad = None
+            if stale:
+                return self.board()
             if "GetOpenDocuments" in str(e):
                 raise RuntimeError("KiCad is running but no board is open in the PCB editor; "
                                    "open the .kicad_pcb in KiCad's PCB editor and retry") from e
@@ -156,17 +162,27 @@ def _outline(board):
     return max(polys, key=lambda p: p.area)
 
 
+def _class_name(nc) -> str:
+    """The classes a net is in. A net in one explicit class gets that class. Otherwise KiCad names
+    the class "Effective for net: X" and lists the real ones, with Default last."""
+    if nc.constituents is None:
+        return nc.name
+    return ", ".join(c for c in nc.constituents if c != "Default") or "Default"
+
+
 def read_model(board, with_zones: bool = True) -> BoardModel:
     copper = sorted((layer_name(l) for l in board.get_enabled_layers() if is_copper(l)), key=_copper_order)
     nets = board.get_nets()
     net_names = {n.name for n in nets if n.name}
     clearance, default = {}, 0.2
+    net_class: dict[str, str] = {}
     try:
         for name, nc in board.get_netclass_for_nets(nets).items():
             if nc.clearance is not None:
                 clearance[name] = mm(nc.clearance)
                 if nc.name == "Default":
                     default = mm(nc.clearance)
+            net_class[name] = _class_name(nc)
     except Exception:
         pass
 
@@ -209,12 +225,16 @@ def read_model(board, with_zones: bool = True) -> BoardModel:
         if isinstance(t, ArcTrack):
             pts = geometry.arc_points((mm(t.start.x), mm(t.start.y)), (mm(t.mid.x), mm(t.mid.y)),
                                       (mm(t.end.x), mm(t.end.y)))
-            g = LineString(pts).buffer(mm(t.width) / 2)
-            kind = "arc"
+            line = LineString(pts)
+            g = line.buffer(mm(t.width) / 2)
+            kind, mid, length = "arc", (mm(t.mid.x), mm(t.mid.y)), line.length
         else:
             g = geometry.track(mm(t.start.x), mm(t.start.y), mm(t.end.x), mm(t.end.y), mm(t.width))
-            kind = "track"
-        items.append(Copper(t.id.value, kind, t.net.name, {L: g}, width=mm(t.width)))
+            kind, mid = "track", None
+            length = math.hypot(mm(t.end.x) - mm(t.start.x), mm(t.end.y) - mm(t.start.y))
+        items.append(Copper(t.id.value, kind, t.net.name, {L: g}, width=mm(t.width),
+                            start=(mm(t.start.x), mm(t.start.y)), mid=mid, end=(mm(t.end.x), mm(t.end.y)),
+                            length=length, locked=t.locked))
 
     for v in board.get_vias():
         x, y, d = mm(v.position.x), mm(v.position.y), mm(v.diameter)
@@ -225,7 +245,7 @@ def read_model(board, with_zones: bool = True) -> BoardModel:
             i0, i1 = sorted((copper.index(layer_name(start)), copper.index(layer_name(end))))
             span = copper[i0:i1 + 1]
         items.append(Copper(v.id.value, "via", v.net.name, {L: geometry.via(x, y, d) for L in span},
-                            drill=drill, at=(x, y)))
+                            drill=drill, at=(x, y), locked=v.locked))
         holes.append(Hole(x, y, drill / 2, v.id.value))
 
     if with_zones:
@@ -240,13 +260,34 @@ def read_model(board, with_zones: bool = True) -> BoardModel:
             if geom:
                 items.append(Copper(z.id.value, "zone", z.net.name, geom, ref=z.name))
 
-    return BoardModel(copper, items, holes, _outline(board), clearance, default, net_names)
+    return BoardModel(copper, items, holes, _outline(board), clearance, default, net_names, net_class)
+
+
+def _connection(z) -> dict:
+    """A zone's pad connection in mm; rule areas have none."""
+    c = z.connection
+    if c is None:
+        return {"connection": None, "thermal_gap": None, "thermal_spoke_width": None}
+    s = c.thermal_spokes
+    return {"connection": bt.ZoneConnectionStyle.Name(c.zone_connection).removeprefix("ZCS_").lower(),
+            "thermal_gap": mm(s.gap or 0), "thermal_spoke_width": mm(s.width or 0)}
+
+
+def _set_connection(zone, connection: str | None, gap: float | None, spoke: float | None) -> None:
+    c = zone.connection
+    if connection is not None:
+        c.zone_connection = bt.ZoneConnectionStyle.Value("ZCS_" + connection.upper())
+    # kipy's thermal_spokes hands out a copy, so its setters change nothing: write the proto itself
+    if gap is not None:
+        c._proto.thermal_spokes.gap.value_nm = nm(gap)
+    if spoke is not None:
+        c._proto.thermal_spokes.width.value_nm = nm(spoke)
 
 
 def list_zones(board) -> list[dict]:
     out = []
     for z in board.get_zones():
-        out.append({"id": z.id.value, "name": z.name, "net": z.net.name if z.net else "",
+        out.append({**_connection(z), "id": z.id.value, "name": z.name, "net": z.net.name if z.net else "",
                     "layers": [layer_name(l) for l in z.layers], "priority": z.priority,
                     "type": bt.ZoneType.Name(z.type), "filled": z.filled,
                     "clearance": mm(z.clearance) if z.clearance is not None else None,
@@ -305,6 +346,7 @@ def build_items(board, plan: Plan) -> list:
             zone.clearance = nm(z.clearance)
         if z.min_thickness is not None:
             zone.min_thickness = nm(z.min_thickness)
+        _set_connection(zone, z.connection, z.thermal_gap, z.thermal_spoke_width)
         out.append(zone)
     return out
 
@@ -383,6 +425,22 @@ def update_zone(board, zone_id: str, **props) -> dict:
     zone = next((z for z in board.get_zones() if z.id.value == zone_id), None)
     if zone is None:
         raise ValueError(f"no zone with id {zone_id}")
+    connection, gap, spoke = props.get("connection"), props.get("thermal_gap"), props.get("thermal_spoke_width")
+    min_thickness = props.get("min_thickness")
+    if zone.is_rule_area() and (connection is not None or gap is not None or spoke is not None):
+        raise ValueError("a rule area has no pad connection or thermal settings")
+    if connection is not None:
+        check_connection(connection)
+    if gap is not None and gap < 0:
+        raise ValueError(f"thermal_gap must not be negative, not {gap}")
+    # only an edit touching these can break the spokes; a rename of an old zone stays allowed
+    if not zone.is_rule_area() and (connection is not None or spoke is not None or min_thickness is not None):
+        now = _connection(zone)
+        problem = spoke_problem(connection or now["connection"],
+                                spoke if spoke is not None else now["thermal_spoke_width"],
+                                min_thickness if min_thickness is not None else mm(zone.min_thickness))
+        if problem:
+            raise ValueError(problem)
     if props.get("name") is not None:
         zone.name = props["name"]
     if props.get("priority") is not None:
@@ -393,6 +451,8 @@ def update_zone(board, zone_id: str, **props) -> dict:
         zone.min_thickness = nm(props["min_thickness"])
     if props.get("island_mode") is not None:
         zone.island_mode = bt.IslandRemovalMode.Value("IRM_" + props["island_mode"].upper())
+    if not zone.is_rule_area():
+        _set_connection(zone, connection, gap, spoke)
     board.update_items(zone)
     return next(z for z in list_zones(board) if z["id"] == zone_id)
 

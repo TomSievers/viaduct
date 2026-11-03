@@ -7,7 +7,8 @@ A plan is plain JSON in millimetres:
       "tracks": [{"net": "GND", "layer": "F.Cu", "start": [x, y], "end": [x, y], "width": 0.25}],
       "vias":   [{"net": "GND", "at": [x, y], "diameter": 0.6, "drill": 0.3}],
       "zones":  [{"net": "GND", "layer": "In1.Cu", "outline": [[x, y], ...],
-                  "name": "GND_In1", "priority": 0, "clearance": 0.2, "min_thickness": 0.2}],
+                  "name": "GND_In1", "priority": 0, "clearance": 0.2, "min_thickness": 0.2,
+                  "connection": "thermal", "thermal_gap": 0.5, "thermal_spoke_width": 0.5}],
       "field_moves":   [{"reference": "R1", "text": "Reference", "dx": 0, "dy": -1.2}],
       "graphic_moves": [{"id": "<uuid>", "x": 120, "y": 80, "rotation": 90}]
     }
@@ -32,6 +33,27 @@ from viaduct.model import BoardModel
 
 EPS = 0.001          # 1 um tolerance on clearance comparisons
 DELETABLE = {"track", "arc", "via", "zone"}
+
+# how a zone joins pads of its net; with spokes narrower than the zone's minimum thickness KiCad
+# fills no spoke at all, and the pad is cut off without any error
+ZONE_CONNECTIONS = ("thermal", "pth_thermal", "full", "none")
+SPOKED = ("thermal", "pth_thermal")
+THERMAL_GAP = 0.5
+THERMAL_SPOKE = 0.5
+ZONE_MIN_THICKNESS = 0.25    # what KiCad gives a zone created without one
+
+
+def check_connection(connection: str) -> None:
+    if connection not in ZONE_CONNECTIONS:
+        raise ValueError(f"zone connection must be one of {list(ZONE_CONNECTIONS)}, not {connection!r}")
+
+
+def spoke_problem(connection: str, spoke: float, min_thickness: float) -> str | None:
+    """Why this zone would cut off pads, or None."""
+    if connection in SPOKED and spoke < min_thickness - EPS:
+        return (f"thermal spoke width {spoke} mm is below the zone's minimum thickness {min_thickness} mm: "
+                "KiCad fills no spokes and the pads are cut off")
+    return None
 
 
 @dataclass
@@ -73,6 +95,9 @@ class NewZone:
     priority: int = 0
     clearance: float | None = None
     min_thickness: float | None = None
+    connection: str = "thermal"
+    thermal_gap: float = THERMAL_GAP
+    thermal_spoke_width: float = THERMAL_SPOKE
 
 
 @dataclass
@@ -112,9 +137,16 @@ def parse(data: dict, default_via=(0.6, 0.3), default_width=0.25) -> Plan:
         plan.vias.append(NewVia(v["net"], x, y, float(v.get("diameter", default_via[0])),
                                 float(v.get("drill", default_via[1])), bool(v.get("locked", False))))
     for z in data.get("zones", []):
+        connection = z.get("connection", "thermal")
+        check_connection(connection)
+        gap = float(z.get("thermal_gap", THERMAL_GAP))
+        if gap < 0:
+            raise ValueError(f"thermal_gap must not be negative, not {gap}")
+        spoke = z.get("thermal_spoke_width")
+        spoke = float(spoke) if spoke is not None else max(THERMAL_SPOKE, z.get("min_thickness") or 0)
         plan.zones.append(NewZone(z["net"], z["layer"], [tuple(map(float, p)) for p in z["outline"]],
                                   z.get("name", ""), int(z.get("priority", 0)),
-                                  z.get("clearance"), z.get("min_thickness")))
+                                  z.get("clearance"), z.get("min_thickness"), connection, gap, spoke))
     for key in ("field_moves", "graphic_moves"):
         moves = data.get(key, [])
         if not isinstance(moves, list) or not all(isinstance(m, dict) for m in moves):
@@ -167,6 +199,10 @@ def check(model: BoardModel, plan: Plan, edge_clearance: float = 0.3,
             out.append({"rule": "unknown_net", "item": f"zone[{i}]", "net": z.net})
         if z.layer not in layers:
             out.append({"rule": "layer_not_enabled", "item": f"zone[{i}]", "layer": z.layer})
+        problem = spoke_problem(z.connection, z.thermal_spoke_width,
+                                z.min_thickness if z.min_thickness is not None else ZONE_MIN_THICKNESS)
+        if problem:
+            out.append({"rule": "thermal_spoke", "item": f"zone[{i}]", "detail": problem})
 
     worst = max(model.net_clearance.values(), default=model.default_clearance)
     for label, net, geom, L in new:
