@@ -49,6 +49,9 @@ files and edits nothing, so it stays clear of Konnect's schematic tools. Konnect
 were not yet searched for a counterpart; if it fits Konnect, it moves there once the rules
 have proven useful.
 
+The pre-route check `check_routable` is tried out here too: it only reads the board. Konnect's
+issues were not yet searched for a counterpart.
+
 ## Left to Konnect
 
 - **Removed because a Konnect release covers them:** reading net classes and the physical

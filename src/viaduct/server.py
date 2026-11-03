@@ -22,7 +22,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.stdio import stdio_server
 
-from viaduct import __version__, connectivity, fanout, kicad_io, plan as planmod, readability, setup_files, silk
+from viaduct import __version__, connectivity, fanout, kicad_io, plan as planmod, readability, routable, setup_files, silk
 from viaduct.errors import ViaductServer
 from viaduct.headless import Headless, stranded_editors
 
@@ -133,6 +133,36 @@ def net_summary(nets: list[str] | None = None, only_broken: bool = False) -> dic
                 if z["type"] == "ZT_COPPER" and not z["filled"]]
     return {"count": len(rows), "broken": sum(r["islands"] > 1 for r in rows),
             "unfilled_zones": unfilled, "nets": rows}
+
+
+@mcp.tool()
+def check_routable(nets: list[str] | None = None, references: list[str] | None = None,
+                   layers: list[str] | None = None, via_in_pad: bool = False, limit: int = 100) -> dict:
+    """Find gross routing errors before routing, in seconds. Changes nothing.
+
+    Every finding is a proof that no route exists at the netclass sizes, given the placement, through
+    vias and the copper that cannot move (pads, locked tracks and vias). A via inside a pad only
+    counts with via_in_pad=true, as in plan_fanout; via_in_pad_fits says when one would fit.
+    track_start_blocked: the track and its clearance fit nowhere on the pad, with the largest width
+    that does; track_start_conflict: two pads fit alone but not together; pad_walled_in: from the
+    pad the track reaches no via spot, copper of its net or open board; nets_trapped: each net gets
+    out alone, but the gaps around a group hold too few tracks, with shortfall and limits naming them.
+
+    A clean result only means nothing is provably wrong, not that the board will route: tight spots
+    pass. Pads already joined to their net, and nets with one pad, are skipped. Edge and hole limits
+    come from the .kicad_pro, or are taken as 0 without one. Zones are not obstacles, since they
+    refill around tracks. Custom rules are not evaluated: custom_rules names the file if there is
+    one, and such a rule can change a result. layers defaults to the outer two.
+    """
+    board = session.board()
+    model = kicad_io.read_model(board)
+    rules = kicad_io.fanout_net_rules(board, sorted(model.nets), fanout.NetRule())
+    limits = kicad_io.board_limits(board)
+    out = routable.check(model, rules, nets, references, limits["edge_clearance"], limits["hole_to_hole"], layers,
+                           via_in_pad)
+    findings = out["findings"]
+    return {**out, "limits": limits, "custom_rules": kicad_io.custom_rules_file(board),
+            "findings": findings[:limit], "truncated": len(findings) > limit}
 
 
 @mcp.tool()

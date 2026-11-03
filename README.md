@@ -62,6 +62,7 @@ need the project closed in KiCad.
 | `net_summary` | One row per net: netclass, copper counts, track length, islands, cut-off pads |
 | `check_plan` | Checks a plan without writing: clearances per netclass, holes, board edge, nets, layers |
 | `apply_plan` | Re-checks, applies as one commit, refills zones, reads back |
+| `check_routable` | Before routing: reports only what provably cannot be routed at the netclass sizes |
 | `plan_fanout` | Joins every SMD pad of a plane net to its plane; the plan goes to `apply_plan` |
 | `set_zone_properties` | Name, priority, clearance, min thickness, island removal mode, pad connection, thermal gap and spoke |
 | `refill_zones`, `save_board` | As named |
