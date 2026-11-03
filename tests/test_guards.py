@@ -2,11 +2,12 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from shapely.geometry import box
 
-from viaduct import geometry
+from viaduct import geometry, kicad_io
 from viaduct import headless as hl
 from viaduct.headless import Headless, hidden_env, lock_file
 from viaduct.model import BoardModel, Copper
@@ -272,3 +273,27 @@ def test_an_editor_ignoring_sigterm_is_killed(tmp_path, monkeypatch):
     # killed, or at most a zombie waiting to be reaped; a live child would still be sleeping
     stat = Path("/proc", child, "stat")
     assert not stat.exists() or stat.read_text().rpartition(") ")[2].startswith("Z")
+
+
+def test_session_reconnects_when_another_kicad_took_the_socket(monkeypatch):
+    class Client:
+        made = 0
+
+        def __init__(self, **_):
+            Client.made += 1
+            self.generation = Client.made
+
+        def get_version(self):
+            return SimpleNamespace(major=10, minor=0, patch=6, full_version="10.0.6")
+
+        def get_board(self):
+            if self.generation == 1 and Client.stale:
+                raise RuntimeError("KiCad returned error: the provided kicad_token did not match")
+            return f"board {self.generation}"
+
+    Client.stale = False
+    monkeypatch.setattr(kicad_io, "KiCad", Client)
+    session = kicad_io.Session(lambda: "ipc:///tmp/kicad/api.sock")
+    assert session.board() == "board 1"
+    Client.stale = True
+    assert session.board() == "board 2"

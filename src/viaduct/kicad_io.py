@@ -102,7 +102,12 @@ class Session:
                 self._kicad = kicad
             return self._kicad.get_board()
         except Exception as e:
+            # another KiCad now holds this socket, e.g. a new hidden editor: this client still
+            # sends the old one's token, so connect again
+            stale = self._kicad is not None and "kicad_token" in str(e)
             self._kicad = None
+            if stale:
+                return self.board()
             if "GetOpenDocuments" in str(e):
                 raise RuntimeError("KiCad is running but no board is open in the PCB editor; "
                                    "open the .kicad_pcb in KiCad's PCB editor and retry") from e
