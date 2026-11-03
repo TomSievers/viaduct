@@ -9,8 +9,10 @@ All public values are millimetres; KiCad's API uses nanometres.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
+from pathlib import Path
 
 from google.protobuf.empty_pb2 import Empty
 from google.protobuf.message import Message
@@ -1226,6 +1228,26 @@ def place_references(board, rules: silk.Rules, references: list[str] | None = No
 
 
 # ---------- plane fanout ----------
+
+def custom_rules_file(board) -> str | None:
+    """The project's .kicad_dru, if it has one."""
+    project = board.get_project()
+    path = Path(project.path) / f"{project.name}.kicad_dru"
+    return str(path) if path.exists() else None
+
+
+def board_limits(board) -> dict:
+    """Edge and hole limits from the project file, which the API cannot read. Without a value 0,
+    since a limit above the board's own could report what is no error."""
+    project = board.get_project()
+    path = Path(project.path) / f"{project.name}.kicad_pro"
+    try:
+        rules = json.loads(path.read_text())["board"]["design_settings"]["rules"]
+    except (OSError, ValueError, KeyError):
+        rules = {}
+    return {"edge_clearance": float(rules.get("min_copper_edge_clearance", 0)),
+            "hole_to_hole": float(rules.get("min_hole_to_hole", 0))}
+
 
 def fanout_net_rules(board, nets: list[str], default: fanout.NetRule) -> dict[str, fanout.NetRule]:
     """Track width and via size per net from its effective netclass, default where unset."""

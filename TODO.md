@@ -9,8 +9,7 @@ Everything below is missing from the API, or broken in it, as of **KiCad 10.0.7*
 Until KiCad exposes them, most of these settings are written into the files instead, while
 KiCad has the project closed (the lock files `~<name>.kicad_pcb.lck` and
 `~<name>.kicad_pro.lck` must be absent). Each item says which tool does that today: a
-Viaduct file tool, or Konnect's where Konnect already has one, since Viaduct does not
-duplicate a released Konnect feature. Each item moves to a live tool once KiCad (or
+Viaduct file tool, or Konnect's where v0.13.0 already has one. Each item moves to a live tool once KiCad (or
 kicad-python) supports it.
 
 Checked by listing the API commands compiled into `_pcbnew.kiface` and `libkiapi.so`
